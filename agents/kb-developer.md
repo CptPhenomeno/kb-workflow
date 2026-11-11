@@ -34,7 +34,11 @@ You receive the item ID in the task (e.g. `KB-3`).
 - One item at a time. Never claim or modify other items on the board.
 - Always use `--json` when you parse kb output; branch on exit codes.
 - Run the project's own test suite for the touched area before declaring green.
-- Do not commit or push unless explicitly asked.
+- Commit autonomously on the active branch (e.g. after each green phase).
+  Never push, and never commit on `develop`.
+- Before `kb move <ID> review`, ensure the working tree is clean: run
+  `git status --porcelain` and commit (or stash) anything left over. A
+  clean working tree is required at review time.
 - If the item turns out to be blocked by missing information, add a
   `kb note <ID>` explaining what is missing, `kb release <ID>`, and say so
   in your final answer.
