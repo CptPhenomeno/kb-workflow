@@ -28,6 +28,8 @@ import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { loadKbWorkflowConfig, resolveAgentModel, type AgentRole } from "./lib/config.ts";
 import { isUnblocked, kbErrorMessage, runKb, type KbItem } from "./lib/kb.ts";
+import { preFlightCheck } from "./lib/git.ts";
+import { runDeveloperRound } from "./lib/orchestration.ts";
 import { actorForAgent, runSubagent, type KbAgentName } from "./lib/subagent.ts";
 
 const AgentParam = StringEnum(["kb-planner", "kb-developer", "kb-reviewer"] as const, {
@@ -263,6 +265,14 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 			}
 			const cwd = ctx.cwd;
 
+			// Pre-flight (FR-1, AC-1): a dirty tree aborts the run before any
+			// board or git action; a clean tree checks out develop first.
+			const pre = await preFlightCheck(cwd);
+			if (!pre.ok) {
+				ctx.ui.notify(`${pre.error} Aborting: no action was taken.`, "error");
+				return;
+			}
+
 			// Preconditions: an initialized board and a SPEC.md.
 			const listRes = await runKb(["list"], cwd);
 			if (listRes.code !== 0) {
@@ -332,13 +342,22 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 						break;
 					}
 
-					// 3. Implement with one automatic retry.
+					// 3. Implement with one automatic retry. FR-2: before each developer
+					// spawn, create/reuse the task branch (feature/<id> / fix/<id>)
+					// from develop and check it out so the developer finds it active.
 					let devOk = false;
+					let taskBranch = "";
 					for (let attempt = 1; attempt <= 2 && !devOk; attempt++) {
 						ctx.ui.setStatus("kb-dev", `dev ${task.id} (try ${attempt})`);
-						const dev = await runSubagent({ agent: "kb-developer", cwd, model: devModel, task: devTask(task, story) });
+						const round = await runDeveloperRound({
+							cwd,
+							task,
+							spawnDev: () => runSubagent({ agent: "kb-developer", cwd, model: devModel, task: devTask(task, story) }),
+						});
+						taskBranch = round.branch;
+						const dev = round.result;
 						devOk = dev.ok;
-						report.push(`- dev ${task.id} "${task.title}" (try ${attempt}): ${dev.ok ? "ok" : "FAILED"} — ${lastLine(dev.output)}`);
+						report.push(`- dev ${task.id} "${task.title}" (try ${attempt}, branch ${taskBranch}): ${dev.ok ? "ok" : "FAILED"} — ${lastLine(dev.output)}`);
 						if (!dev.ok) report.push(`  error: ${dev.errorMessage ?? ""} ${dev.stderr.trim().slice(0, 300)}`);
 					}
 					if (!devOk) {
