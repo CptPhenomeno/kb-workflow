@@ -1,0 +1,301 @@
+spec: SPEC.md
+status: todo
+items:
+  - ref: git-workflow
+    type: epic
+    title: Git-integrated /kb-dev workflow (v0.1.0)
+    description: |
+      /kb-dev today runs on whatever branch is checked out, subagents never
+      commit, and nobody reviews stories/epics themselves (see
+      .pi/kb-workflow-memory.md). SPEC.md v0.1.0 integrates a local git
+      workflow: a branch per task created from develop, autonomous developer
+      commits, reviewer merge with ff → no-ff → abort chain, a fourth kb-qa
+      agent, and automatic kb-qa review of stories and epics with
+      task-branch cleanup.
+      Done when all acceptance criteria AC-1..AC-10 of SPEC.md v0.1.0 are met.
+    acceptance:
+      - AC-1 dirty tree aborts /kb-dev with an error, no side effects
+      - AC-2 every task gets feature/<id> or fix/<id> from develop, reused on re-run
+      - AC-3 developer leaves a clean tree with at least one commit on the branch
+      - AC-4 after OK review the changes are reachable from develop, item done, branch kept
+      - AC-5 merge conflicts leave the item in review and develop unchanged
+      - AC-6 review-to-todo keeps the branch; next round reuses it
+      - AC-7 story kb-qa review on all-tasks-done; success deletes merged task branches
+      - AC-8 epic kb-qa review when all sibling stories are done; planner never reviews stories/epics
+      - AC-9 no remote git operations anywhere
+      - AC-10 tests cover naming, reuse, merge chain, dirty-tree, merge verification
+    children:
+      - ref: git-lib
+        type: story
+        title: Git plumbing library (lib/git.ts) with checked local operations
+        description: |
+          The handler needs deterministic, exit-code-checked local git
+          operations (SPEC v0.1.0 NFR-3, NFR-1, NFR-2). A new lib/git.ts
+          module wraps the git commands used by the workflow: status
+          --porcelain, checkout, branch creation/reuse, merge with
+          ff-only → no-ff → abort chain, and safe branch deletion
+          (git branch -d only). No remote operations exist in the module.
+          Done when every command checks its exit code and failures throw
+          errors that the handler can surface to the user.
+        acceptance:
+          - every git command's non-zero exit aborts with a clear error
+          - no push/pull/fetch/force/reset/branch -D code paths exist
+        children:
+          - ref: git-lib-basic
+            type: task
+            title: Basic git operations wrapper (status, checkout, branch create/reuse)
+            priority: high
+            points: 3
+            description: |
+              FR-1 and FR-2 need clean-tree detection, checkout of develop,
+              and creation or reuse of feature/<KB-id> / fix/<KB-id> branches
+              from develop. lib/git.ts exposes functions for these, each
+              checking exit codes (NFR-3). Existing task branches are never
+              deleted or recreated mid-story (NFR-2).
+              Done when the wrapper functions exist, are typed, and are
+              covered by unit tests.
+            tests:
+              - dirty tree detection via git status --porcelain
+              - branch prefix feature/ for tasks and fix/ for bugs
+              - existing branch is reused, never recreated
+            acceptance:
+              - branch name is feature/<id> or fix/<id> by kb item type
+              - reusing an existing branch does not recreate it
+          - ref: git-lib-merge
+            type: task
+            title: Merge chain ff-only → no-ff → abort and safe branch deletion
+            priority: high
+            points: 5
+            description: |
+              FR-4 needs a merge routine that tries git merge --ff-only,
+              then git merge --no-ff with a message referencing the task ID,
+              and on failure runs git merge --abort leaving develop
+              unchanged (AC-5). FR-7 needs a merge-verification helper
+              (branch tip is an ancestor of develop) plus git branch -d
+              deletion that refuses unmerged branches.
+              Done when mergeChain returns the outcome (ff | no-ff | failed)
+              and deleteMergedBranch verifies ancestry before deleting.
+            tests:
+              - ff merge succeeds when develop is behind
+              - no-ff merge used when ff fails
+              - conflicting merge aborts and develop is unchanged
+              - isMerged reports ancestry of develop correctly
+              - deletion uses -d and refuses unmerged branches
+            acceptance:
+              - merge outcome ff / no-ff / failed is reported per AC-4 and AC-5
+              - only -d (safe) deletion is available
+            blocks: [dev-handler-story-review, reviewer-agent-merge]
+
+      - ref: dev-handler
+        type: story
+        title: "/kb-dev handler: pre-flight checks and branch-per-task orchestration"
+        description: |
+          The /kb-dev loop must stop running on arbitrary branches. The
+          handler gains FR-1 pre-flight checks (board+spec exist, clean
+          tree, checkout develop) and FR-2 branch-per-task setup before
+          spawning each kb-developer subagent, using lib/git.ts and
+          reporting failures via ctx.ui.notify (NFR-3). The existing TDD
+          loop, claims, MAX_ATTEMPTS_PER_TASK and review rounds are
+          unchanged (NFR-5).
+          Done when /kb-dev creates and checks out the right branch for
+          every task and refuses to start on a dirty tree.
+        acceptance:
+          - AC-1 dirty tree aborts before any board or git action
+          - AC-2 each task is developed on feature/<id> or fix/<id> from develop
+        children:
+          - ref: dev-handler-preflight
+            type: task
+            title: Dirty-tree pre-flight abort with clear error
+            priority: high
+            points: 2
+            description: |
+              AC-1: before starting work on a story the handler runs
+              git status --porcelain; on a dirty tree it aborts with an
+              error asking the user to commit or stash manually, with no
+              automatic stash or commit and no board action. It also
+              checks out develop before the first task of the run.
+              Done when /kb-dev with a dirty tree performs no action and
+              shows the error.
+            tests:
+              - dirty tree aborts the run before any kb or git mutation
+              - clean tree proceeds and checks out develop first
+            acceptance:
+              - no automatic stash or auto-commit exists
+            blocks: [dev-handler-branching]
+          - ref: dev-handler-branching
+            type: task
+            title: Branch creation/checkout before each developer spawn
+            priority: high
+            points: 3
+            description: |
+              FR-2: before spawning the kb-developer for a task the
+              handler checks out develop, creates or reuses
+              feature/<KB-id> / fix/<KB-id> (prefix from kb item type),
+              and checks the branch out so the developer finds it active.
+              Existing branches from earlier rounds are reused as-is.
+              Done when every developer round runs on the correct,
+              reused task branch.
+            tests:
+              - handler checks out the task branch before spawning developer
+              - review-to-todo round reuses the same branch
+            acceptance:
+              - AC-2 and AC-6 branch reuse hold
+            blocks: [developer-agent-commits, reviewer-agent-merge]
+
+      - ref: agents-update
+        type: story
+        title: "Subagent prompts: autonomous developer commits and reviewer merge"
+        description: |
+          The agents/*.md prompts must match the new git workflow. The
+          developer commits autonomously on the active branch (FR-3) and
+          leaves a clean tree before kb move review; the reviewer reviews
+              the branch diff against develop and merges per the
+          ff → no-ff → abort chain (FR-4), moving the item to done or back
+          to todo. No remote operations in any prompt (NFR-1).
+          Done when both prompts implement their FR-3/FR-4 duties.
+        acceptance:
+          - AC-3 clean tree and at least one commit after developer finishes
+          - AC-4/AC-5/AC-6 reviewer merge and fallback behavior
+        children:
+          - ref: developer-agent-commits
+            type: task
+            title: kb-developer commits autonomously on the task branch
+            priority: high
+            points: 2
+            description: |
+              FR-3: agents/kb-developer.md replaces "Do not commit or push
+              unless explicitly asked" with: commit autonomously on the
+              active branch (e.g. after each green phase), never push,
+              never commit on develop, and ensure the working tree is
+              clean before kb move <ID> review.
+              Done when the prompt instructs autonomous commits and a
+              clean tree at review time.
+            tests:
+              - prompt forbids push and committing on develop
+              - prompt requires clean tree before moving to review
+            acceptance:
+              - AC-3 holds for every task round
+          - ref: reviewer-agent-merge
+            type: task
+            title: kb-reviewer reviews branch diff and merges into develop
+            priority: high
+            points: 5
+            description: |
+              FR-4: agents/kb-reviewer.md reviews the diff of the task
+              branch against develop (not the working tree). On OK it
+              checks acceptance criteria, notes, merges per the
+              ff → no-ff → abort chain (via the git lib), then
+              kb move <ID> done with a final note; branches are not
+              deleted at task level. On problems it notes and moves the
+              item back to todo, leaving the branch open. On merge failure
+              the item stays in review and the error is surfaced.
+              Done when the reviewer prompt drives AC-4/AC-5/AC-6 behavior.
+            tests:
+              - reviewer prompt reviews branch-vs-develop diff
+              - merge failure keeps item in review and reports the error
+              - OK verdict merges and moves the item to done without deleting the branch
+            acceptance:
+              - AC-4, AC-5 and AC-6 hold
+
+      - ref: dev-handler-story-review
+        type: story
+        title: Automatic kb-qa review of stories and epics with branch cleanup
+        description: |
+          Nobody currently reviews story/epic items themselves. FR-5/FR-6:
+          when all tasks of a story are done, /kb-dev automatically spawns
+          a kb-qa subagent (a fourth role of equal standing, FR-8) that
+          validates the story's acceptance criteria against develop; on
+          success it verifies every task branch is merged into develop,
+          deletes them (git branch -d), checks all criteria, notes and
+          moves the story to done; on failure the story goes back to todo
+          with a note. The same review runs on the epic when all sibling
+          stories are done. Branch deletion follows FR-7 (task branches
+          only, kb-qa only, after merge verification). kb-planner never
+          reviews stories or epics.
+          Done when AC-7 and AC-8 hold automatically at the end of the loop.
+        acceptance:
+          - AC-7 story kb-qa review with branch deletion on success
+          - AC-8 epic kb-qa review when all stories are done; planner never spawned for review
+        children:
+          - ref: planner-agent-story-review
+            type: task
+            title: "kb-qa agent: system prompt and registration as fourth role"
+            priority: medium
+            points: 3
+            description: |
+              FR-8/FR-5/FR-6/FR-7: a new agents/kb-qa.md system prompt
+              (identify as agent-qa-<story/epic ID>, kb show <ID> --json,
+              validate acceptance criteria against the merged work on
+              develop, verify branch ancestry, delete task branches with
+              git branch -d, move the item to done or back to todo with a
+              note); the kb_agent tool's agent parameter accepts kb-qa
+              alongside the other three roles; the model config gains a
+              qa role (models.qa / resolveAgentModel("qa", ...)) with the
+              same fallback-to-session-model rule. Only task branches are
+              deleted, never with -D.
+              Done when kb-qa is a first-class agent usable via kb_agent.
+            tests:
+              - kb_agent tool accepts agent "kb-qa"
+              - models.qa resolves with fallback to the session model
+              - kb-qa deletes only merged task branches with -d
+              - unmet criteria send the story back to todo with a note
+            acceptance:
+              - kb-qa registered with prompt, tool enum entry and qa config role
+              - no deleted branch tip is missing from develop
+          - ref: handler-auto-review
+            type: task
+            title: "/kb-dev spawns kb-qa automatically at story and epic completion"
+            priority: medium
+            points: 3
+            description: |
+              FR-5/FR-6 orchestration in index.ts: when the loop ends with
+              every task of the story done, the handler spawns the kb-qa
+              story review; after a story is done, if all sibling stories
+              of the epic are done it runs the epic review. Results and
+              branch deletions appear in the final report (NFR-4). The
+              kb-planner subagent is never spawned for story/epic review.
+              Done when story and epic reviews run without user action.
+            tests:
+              - all-tasks-done triggers the story kb-qa review
+              - all-stories-done triggers the epic kb-qa review
+              - final report lists branches, merge outcomes, review verdicts and deletions
+            acceptance:
+              - AC-7 and AC-8 hold end to end
+            blocks: [workflow-tests]
+
+      - ref: workflow-tests
+        type: story
+        title: Test coverage for the git workflow (AC-10)
+        description: |
+          AC-10 requires tests covering branch naming/prefix choice, branch
+          reuse, the ff → no-ff → abort merge chain, dirty-tree pre-flight,
+          and "all branches merged" verification before deletion. These
+          live alongside the git lib and handler tests and use a temporary
+          local git repository fixture; no network is touched (NFR-1).
+          Done when AC-10's five areas are covered by passing tests.
+        acceptance:
+          - AC-10 all five areas covered by automated tests
+        children:
+          - ref: tests-git-fixture
+            type: task
+            title: Temp local git repo test fixture and workflow test suite
+            priority: medium
+            points: 5
+            description: |
+              A test fixture builds a throwaway local git repository
+              (init, develop branch, initial commit) so tests can exercise
+              the real git lib. The suite covers: feature/fix prefix
+              choice by kb item type, branch reuse across rounds, the
+              merge chain ff → no-ff → abort with develop unchanged after
+              abort, dirty-tree pre-flight abort, and ancestry verification
+              before branch deletion.
+              Done when all AC-10 tests pass and no test performs a
+              remote operation.
+            tests:
+              - branch naming prefix by item type
+              - branch reuse on second round
+              - ff then no-ff then abort merge chain behavior
+              - dirty tree aborts pre-flight
+              - all-branches-merged verification gates deletion
+            acceptance:
+              - AC-10 suite passes locally with git available
