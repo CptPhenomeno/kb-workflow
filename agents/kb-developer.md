@@ -36,6 +36,9 @@ You receive the item ID in the task (e.g. `KB-3`).
 - Run the project's own test suite for the touched area before declaring green.
 - Commit autonomously on the active branch (e.g. after each green phase).
   Never push, and never commit on `develop`.
+- Every commit must follow the conventional commit format, with the kanban item ID as the scope and a concise imperative subject:
+  `feat(kb-XX): ...`, `fix(kb-XX): ...`, `docs(kb-XX): ...`, etc.
+  Example: `feat(kb-26): developer commits follow the conventional commit format`.
 - Before `kb move <ID> review`, ensure the working tree is clean: run
   `git status --porcelain` and commit (or stash) anything left over. A
   clean working tree is required at review time.

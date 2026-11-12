@@ -18,6 +18,15 @@ test("kb-developer prompt forbids push and committing on develop", () => {
 	assert.match(developerPrompt, /commit autonomously/i);
 });
 
+test("kb-developer prompt requires conventional commit messages", () => {
+	assert.match(developerPrompt, /conventional commit/i);
+	assert.match(developerPrompt, /feat\(kb-XX\)/);
+	assert.match(developerPrompt, /fix\(kb-XX\)/);
+	assert.match(developerPrompt, /docs\(kb-XX\)/);
+	assert.match(developerPrompt, /kanban item ID as the scope/i);
+	assert.match(developerPrompt, /imperative/i);
+});
+
 test("kb-developer prompt requires clean tree before moving to review", () => {
 	assert.match(developerPrompt, /clean working tree/i);
 	assert.match(developerPrompt, /before `?kb move (<ID>|<id>) review`?/i);
