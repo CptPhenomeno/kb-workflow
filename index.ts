@@ -32,8 +32,9 @@ import { Type } from "typebox";
 import { loadKbWorkflowConfig, resolveAgentModel, type AgentRole } from "./lib/config.ts";
 import { kbErrorMessage, runKb, type KbItem } from "./lib/kb.ts";
 import { preFlightCheck } from "./lib/git.ts";
-import { runBareDev, type BareModeResult } from "./lib/bare-mode.ts";
-import { runMessageDev, type MessageModeResult } from "./lib/message-mode.ts";
+import { runBareDev } from "./lib/bare-mode.ts";
+import { runMessageDev } from "./lib/message-mode.ts";
+import { dispatchDev } from "./lib/dispatch.ts";
 import { actorForAgent, runSubagent, type KbAgentName } from "./lib/subagent.ts";
 
 const AgentParam = StringEnum(["kb-planner", "kb-developer", "kb-reviewer"] as const, {
@@ -304,7 +305,6 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 				return story ?? null;
 			};
 
-		const message = args.trim();
 		const spawnReviewer = (item: KbItem) =>
 			runSubagent({ agent: "kb-reviewer", cwd, model: revModel, task: reviewTask(item) });
 
@@ -312,36 +312,36 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 		let report: string;
 		let delivered = true;
 		try {
-			if (message) {
-				// Message mode (FR-10): pending reviews first, then the message
-				// is handed to the main agent as a kickoff; the handler itself
-				// performs no other board or git action (FR-10 step 4).
-				const result: MessageModeResult = await runMessageDev({
-					cwd,
-					message,
-					kb: (a) => runKb(a, cwd),
-					preFlight: () => preFlightCheck(cwd),
-					spawnReviewer,
-					sendUserMessage: (text) => pi.sendUserMessage(text),
-					notify: (msg, level) => ctx.ui.notify(msg, level),
-					setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
-				});
-				report = result.report;
-				delivered = result.delivered;
-			} else {
-				// Bare mode (FR-9): pending reviews first, then the next board-level
-				// element via `kb next`, worked through its full cycle, then stop.
-				const result: BareModeResult = await runBareDev({
-					cwd,
-					kb: (a) => runKb(a, cwd),
-					spawnDev: async (task) =>
-						runSubagent({ agent: "kb-developer", cwd, model: devModel, task: devTask(task, await storyOf(task)) }),
-					spawnReviewer,
-					notify: (msg, level) => ctx.ui.notify(msg, level),
-					setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
-				});
-				report = result.report;
-			}
+			// Mode dispatch (FR-9 vs FR-10): a bare invocation works the next
+			// board-level element via `kb next` (one element per invocation);
+			// a message argument hands the message to the main agent as a
+			// kickoff. Exactly one mode runs.
+			const result = await dispatchDev({
+				args,
+				runBare: () =>
+					runBareDev({
+						cwd,
+						kb: (a) => runKb(a, cwd),
+						spawnDev: async (task) =>
+							runSubagent({ agent: "kb-developer", cwd, model: devModel, task: devTask(task, await storyOf(task)) }),
+						spawnReviewer,
+						notify: (msg, level) => ctx.ui.notify(msg, level),
+						setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
+					}),
+				runMessage: (message) =>
+					runMessageDev({
+						cwd,
+						message,
+						kb: (a) => runKb(a, cwd),
+						preFlight: () => preFlightCheck(cwd),
+						spawnReviewer,
+						sendUserMessage: (text) => pi.sendUserMessage(text),
+						notify: (msg, level) => ctx.ui.notify(msg, level),
+						setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
+					}),
+			});
+			report = result.report;
+			delivered = result.delivered ?? true;
 		} finally {
 			ctx.ui.setStatus("kb-dev", undefined);
 		}
