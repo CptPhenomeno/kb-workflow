@@ -5,10 +5,11 @@
  *   /kb-plan [idea]  Interactive analysis with the user (via the ask_user tool),
  *                    then SPEC.md is written/versioned at the project root and the
  *                    kb-planner subagent turns it into plan.yaml + kb board import.
- *   /kb-dev          Automatic loop over the next open story: kb-developer subagents
- *                    implement its tasks one at a time (kb resolves the DAG via
- *                    blockers), then a kb-reviewer subagent reviews each item in the
- *                    review column.
+ *   /kb-dev          Completes pending reviews, then works the next available
+ *                    board-level element (kb next): a kb-developer subagent
+ *                    implements it (kb resolves the DAG via blockers), then a
+ *                    kb-reviewer subagent reviews and merges it. One element per
+ *                    invocation.
  *
  * Tools (callable by the LLM):
  *   ask_user         Ask the user a question (input / select / multi-select).
@@ -27,9 +28,9 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { loadKbWorkflowConfig, resolveAgentModel, type AgentRole } from "./lib/config.ts";
-import { isUnblocked, kbErrorMessage, runKb, type KbItem } from "./lib/kb.ts";
+import { kbErrorMessage, runKb, type KbItem } from "./lib/kb.ts";
 import { preFlightCheck } from "./lib/git.ts";
-import { runDeveloperRound } from "./lib/orchestration.ts";
+import { runBareDev, type BareModeResult } from "./lib/bare-mode.ts";
 import { actorForAgent, runSubagent, type KbAgentName } from "./lib/subagent.ts";
 
 const AgentParam = StringEnum(["kb-planner", "kb-developer", "kb-reviewer"] as const, {
@@ -42,11 +43,6 @@ const textResult = (t: string) => ({
 	content: [{ type: "text" as const, text: t }],
 	details: { answer: t },
 });
-
-const lastLine = (s: string): string => {
-	const lines = s.split("\n").map((l) => l.trim()).filter(Boolean);
-	return lines.length ? lines[lines.length - 1] : "(no output)";
-};
 
 function planKickoff(idea: string): string {
 	return `The user wants to build:
@@ -71,9 +67,12 @@ Call the \`kb_agent\` tool with agent "kb-planner" and a task that instructs it 
 Finally, report to the user: the plan structure (epics/stories/tasks) and the import result.`;
 }
 
-function devTask(task: KbItem, story: KbItem): string {
+function devTask(task: KbItem, story?: KbItem | null): string {
+	const where = story
+		? ` of story ${story.id} ("${story.title}")`
+		: "";
 	return [
-		`Implement kanban item ${task.id} ("${task.title}") of story ${story.id} ("${story.title}") in the project rooted at the cwd.`,
+		`Implement kanban item ${task.id} ("${task.title}")${where} in the project rooted at the cwd.`,
 		``,
 		`Follow your system prompt (kb-developer) and the appended kb guide exactly:`,
 		`- claim the item as agent-dev-${task.id}`,
@@ -253,11 +252,11 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 	});
 
 	// ---------------------------------------------------------------------------
-	// Command: /kb-dev — automatic loop over the next open story.
+	// Command: /kb-dev — one board-level element per invocation (FR-9).
 	// ---------------------------------------------------------------------------
 	pi.registerCommand("kb-dev", {
 		description:
-			"Work the next open kb story: kb-developer subagents implement its tasks one at a time (kb resolves the DAG via blockers), then a kb-reviewer subagent reviews each item in the review column",
+			"Work the next available kb element (kb next, board level): a kb-developer subagent implements it (kb resolves the DAG via blockers), then a kb-reviewer subagent reviews and merges it; items left in review are completed first",
 		handler: async (_args, ctx) => {
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("The agent is busy; try again when idle.", "warning");
@@ -284,102 +283,43 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 				return;
 			}
 
-			// Pick the next open, unblocked story in board order.
-			const all = (listRes.json as KbItem[] | undefined) ?? [];
-			const stories = all
-				.filter((i) => i.type === "story" && i.status !== "done" && isUnblocked(i))
-				.sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
-			if (stories.length === 0) {
-				ctx.ui.notify("No open story to work on (all done or blocked).", "info");
-				return;
-			}
-			const story = stories[0];
-			if (story.status === "backlog") {
-				await runKb(["move", story.id, "todo"], cwd); // best effort
-			}
-			ctx.ui.notify(`Working story ${story.id}: ${story.title}`, "info");
-
+			// Models for the subagents (same resolution rules as v0.1.0, NFR-6).
 			const config = loadKbWorkflowConfig(cwd);
 			const fallbackModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const devModel = resolveAgentModel("developer", config, fallbackModel);
 			const revModel = resolveAgentModel("reviewer", config, fallbackModel);
 
-			const report: string[] = [`# /kb-dev report — story ${story.id} "${story.title}"`, ""];
-			const attempts = new Map<string, number>();
-			const MAX_ATTEMPTS_PER_TASK = 3;
-			const MAX_ITERATIONS = 100;
+			// Resolve the parent story of a task for its dev prompt (best effort).
+			const storyCache = new Map<string, KbItem | null>();
+			const storyOf = async (task: KbItem): Promise<KbItem | null> => {
+				if (!task.parent) return null;
+				if (storyCache.has(task.parent)) return storyCache.get(task.parent) ?? null;
+				const res = await runKb(["show", task.parent], cwd);
+				const story = (res.code === 0 ? res.json : undefined) as KbItem | undefined;
+				storyCache.set(task.parent, story ?? null);
+				return story ?? null;
+			};
 
-			ctx.ui.setStatus("kb-dev", `story ${story.id}`);
+			// Bare mode (FR-9): pending reviews first, then the next board-level
+			// element via `kb next`, worked through its full cycle, then stop.
+			ctx.ui.setStatus("kb-dev", "running");
+			let result: BareModeResult;
 			try {
-				for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-					// 1. Review items already sitting in the review column of this story.
-					const reviewRes = await runKb(["list", "--parent", story.id, "--status", "review"], cwd);
-					const reviewItems = ((reviewRes.json as KbItem[] | undefined) ?? []).filter((i) => i.status === "review");
-					let didReview = false;
-					for (const item of reviewItems) {
-						didReview = true;
-						ctx.ui.setStatus("kb-dev", `review ${item.id}`);
-						const rev = await runSubagent({ agent: "kb-reviewer", cwd, model: revModel, task: reviewTask(item) });
-						report.push(`- review ${item.id} "${item.title}": ${rev.ok ? "ok" : "FAILED"} — ${lastLine(rev.output)}`);
-						if (!rev.ok) report.push(`  error: ${rev.errorMessage ?? ""} ${rev.stderr.trim().slice(0, 300)}`);
-					}
-
-					// 2. Take the next available task of this story (kb enforces blockers/DAG).
-					const next = await runKb(["next", "--parent", story.id], cwd);
-					if (next.code === 2) {
-						if (!didReview) break; // nothing available and nothing reviewed this round
-						continue;
-					}
-					if (next.code !== 0) {
-						report.push(`- kb next failed: ${kbErrorMessage(next)}`);
-						break;
-					}
-					const task = next.json as KbItem;
-					const n = (attempts.get(task.id) ?? 0) + 1;
-					attempts.set(task.id, n);
-					if (n > MAX_ATTEMPTS_PER_TASK) {
-						report.push(`- task ${task.id} exceeded ${MAX_ATTEMPTS_PER_TASK} attempts; stopping.`);
-						break;
-					}
-
-					// 3. Implement with one automatic retry. FR-2: before each developer
-					// spawn, create/reuse the task branch (feature/<id> / fix/<id>)
-					// from develop and check it out so the developer finds it active.
-					let devOk = false;
-					let taskBranch = "";
-					for (let attempt = 1; attempt <= 2 && !devOk; attempt++) {
-						ctx.ui.setStatus("kb-dev", `dev ${task.id} (try ${attempt})`);
-						const round = await runDeveloperRound({
-							cwd,
-							task,
-							spawnDev: () => runSubagent({ agent: "kb-developer", cwd, model: devModel, task: devTask(task, story) }),
-						});
-						taskBranch = round.branch;
-						const dev = round.result;
-						devOk = dev.ok;
-						report.push(`- dev ${task.id} "${task.title}" (try ${attempt}, branch ${taskBranch}): ${dev.ok ? "ok" : "FAILED"} — ${lastLine(dev.output)}`);
-						if (!dev.ok) report.push(`  error: ${dev.errorMessage ?? ""} ${dev.stderr.trim().slice(0, 300)}`);
-					}
-					if (!devOk) {
-						report.push(`- task ${task.id} not completed after 2 tries; stopping.`);
-						break;
-					}
-				}
+				result = await runBareDev({
+					cwd,
+					kb: (args) => runKb(args, cwd),
+					spawnDev: async (task) =>
+						runSubagent({ agent: "kb-developer", cwd, model: devModel, task: devTask(task, await storyOf(task)) }),
+					spawnReviewer: (item) => runSubagent({ agent: "kb-reviewer", cwd, model: revModel, task: reviewTask(item) }),
+					notify: (message, level) => ctx.ui.notify(message, level),
+				setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
+				});
 			} finally {
 				ctx.ui.setStatus("kb-dev", undefined);
 			}
 
-			// Final board state of the story.
-			const finalRes = await runKb(["list", "--parent", story.id], cwd);
-			const items = (finalRes.json as KbItem[] | undefined) ?? [];
-			report.push("", "## Final state of the story:", "");
-			for (const it of items) report.push(`- ${it.id} [${it.status}] ${it.title}`);
-			const storyRes = await runKb(["show", story.id], cwd);
-			const storyNow = storyRes.json as KbItem | undefined;
-			if (storyNow) report.push("", `Story ${storyNow.id} is now in column "${storyNow.status}".`);
-
-			ctx.ui.notify(`Finished story ${story.id}. See the report in chat.`, "info");
-			pi.sendMessage({ customType: "kb-workflow", content: report.join("\n"), display: true });
+			ctx.ui.notify("Finished the /kb-dev run. See the report in chat.", "info");
+			pi.sendMessage({ customType: "kb-workflow", content: result.report, display: true });
 		},
 	});
 }

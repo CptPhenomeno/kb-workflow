@@ -8,7 +8,7 @@ A [pi](https://github.com/badlogic/pi-mono) extension that drives the
 | Command | What it does |
 | ------- | ------------ |
 | `/kb-plan [idea]` | Interviews you (via the `ask_user` tool) until the specification is clear, asks for confirmation, then writes a new versioned section (`## vN — <date>`, appended at the end) to `SPEC.md` at the project root. Finally it runs the **kb-planner** subagent, which runs `kb init` if needed, writes `plan.yaml` at the project root, validates it with `kb import plan.yaml --dry-run` and imports it (`--update` when the refs already exist). |
-| `/kb-dev` | Picks the next open, unblocked **story** on the board and works it to completion: for each task (in DAG order, `kb next --parent <story>` already respects `blocks`) it spawns a **kb-developer** subagent (one automatic retry on failure), then any item in `review` is checked by a **kb-reviewer** subagent (re-runs the test suite, inspects the diff, moves to `done` or sends back to `todo`). One story per invocation; re-running `/kb-dev` continues with the next story. |
+| `/kb-dev` | First completes the review of any items already sitting in `review` (board-wide, one **kb-reviewer** round per item), then resolves the next available task or bug with `kb next` at board level (no parent filter — the kb DAG decides) and works exactly that one element through its full cycle: **kb-developer** subagent (one automatic retry on failure, branch per task) and **kb-reviewer** round (reviews the branch diff against `develop`, merges, moves to `done` or sends back to `todo`). One element per invocation; re-running `/kb-dev` continues with the next one. If nothing is available, the user is notified. |
 
 ## Tools (callable by the LLM)
 
