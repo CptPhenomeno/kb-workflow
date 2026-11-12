@@ -100,3 +100,72 @@ If the branch already exists (e.g. a review round sent the task back to `todo`),
 - Handling/cleanup of pre-existing historical branches (e.g. `feature/base_workflow`, `feature/kb-agents-thinking-config`).
 - Automatic conflict resolution on merge.
 - Parallel task execution (the loop stays sequential, one task at a time).
+
+## v0.1.1 — 2026-11-12
+
+Changes vs v0.1.0: **only how `/kb-dev` retrieves the work items changes**; the per-task machinery (pre-flight, branch per task, autonomous commits, review with merge chain, kb-qa story/epic review) is untouched and is shared by both retrieval modes. `/kb-dev` gains an optional message argument, and its no-argument mode stops selecting work by story: it takes the first available element from the board DAG.
+
+### Goal and context
+
+Today `/kb-dev` picks the first open, unblocked **story** by board position and works it to exhaustion (`kb next --parent <story>` until exit 2). Two needs are unmet:
+
+1. the user cannot steer a run: there is no way to say "work on *this*";
+2. selection ignores the board DAG at the top level: the first story by position is chosen even when a later, higher-priority unblocked task exists.
+
+Version 0.1.1 replaces only the retrieval step with two modes:
+
+- **`/kb-dev <message>`** — the message is the retrieval criterion. After pre-flight and after completing any reviews still pending on the board (same as the bare mode), the handler passes the message as a kickoff to the main pi agent (`pi.sendUserMessage`, the same mechanism `/kb-plan` uses): the main agent interprets the message (which may be generic, e.g. "fix the broken tests"), identifies the pertinent items on the board, asks the user for clarification with `ask_user` when the message is ambiguous or maps to no item, and works those items — in DAG order — through the standard pipeline.
+- **`/kb-dev`** (no arguments) — the first available **task or bug** on the whole board, resolved by the kb DAG via `kb next` (blockers, then priority, then position), regardless of which story it belongs to. **One element per invocation**: the invocation completes that element's full cycle and stops; the user re-invokes for the next.
+
+### Actors
+
+- **`/kb-dev` handler (deterministic code in `index.ts`)** — parses the command arguments; runs the pre-flight; in message mode hands the message to the main agent; in bare mode resolves the single element via `kb next` and drives the existing per-task loop for it.
+- **Main pi agent** — only involved in message mode: interprets the message, selects the items, dispatches the same subagent rounds via the `kb_agent` tool, asks the user when unclear.
+- **`kb-developer` / `kb-reviewer` / `kb-qa` subagents** — unchanged: same system prompts, same task prompts, same TDD/merge/qa behavior.
+
+### Functional requirements
+
+**FR-9 — Bare invocation: board-level retrieval.** When invoked without arguments, after the pre-flight checks of FR-1 the handler must:
+1. complete the review of any items already sitting in the `review` column (same rounds as today);
+2. resolve the next element with `kb next` (board level, no `--parent` filter): the first available task or bug according to the kb DAG — blockers, then priority, then position;
+3. work exactly that one element through its full cycle (FR-2 branch per task, developer round with retry, FR-4 review with merge): the element ends `done` (or back in `todo` on problems) and the invocation stops;
+4. if `kb next` reports nothing available, notify the user and take no further action.
+
+**FR-10 — Message invocation: user-steered retrieval.** When invoked as `/kb-dev <message>`, the handler must:
+1. run the same pre-flight checks of FR-1 (dirty tree aborts before anything else);
+2. complete the review of any items already sitting in the `review` column — exactly the same deterministic rounds as FR-9 step 1 (board-wide, one kb-reviewer round per item, FR-4 merge chain);
+3. pass the message to the main pi agent as a kickoff via `pi.sendUserMessage`, using a fixed kickoff template that instructs the main agent to: interpret the message as operational instructions; identify the pertinent kb items on the board (by ID/ref or by matching the request against titles, descriptions and test states — generic requests must work); when the message is ambiguous or maps to no item, ask the user with `ask_user` before touching the board; work the identified items in DAG order using the standard pipeline (branch per task per FR-2, kb-developer round with the same retry policy, kb-reviewer round with the FR-4 merge chain, final report);
+4. not perform any board or git action itself beyond the pre-flight and the pending-review rounds of step 2: item selection and orchestration belong to the main agent.
+
+### Non-functional requirements
+
+- **NFR-6 (equivalence):** both retrieval modes drive the identical per-task machinery of v0.1.0 (FR-1..FR-8) and share the same pending-review step (items left in `review` by a previous run are completed first, in both modes); no subagent prompt, task prompt, retry policy, report format or model-resolution rule changes.
+- **NFR-7 (determinism, bare mode):** the choice of the element is delegated entirely to `kb next` — the handler adds no own ordering and works at most one element per invocation.
+- **NFR-8 (safety, message mode):** pre-flight runs before the message is delivered; the main agent makes no board or git change until the pertinent items are identified, and asks the user (`ask_user`) whenever the message does not map to actionable items.
+
+### Acceptance criteria
+
+- **AC-11:** `/kb-dev` without arguments works exactly one element — the first available task or bug per the kb DAG, even if it belongs to a story that is not first by position — and the invocation stops after that element's cycle (report included).
+- **AC-12:** `/kb-dev` without arguments when `kb next` finds nothing available: the user is notified and no board or git action is taken.
+- **AC-13:** Items left in `review` by a previous run are reviewed (and merged/closed) before a new element is retrieved in bare mode.
+- **AC-14:** `/kb-dev <message>` runs the pre-flight, then completes any reviews still pending on the board (same behavior as AC-13), and only then delivers the message to the main agent, which works the identified items in DAG order through the standard pipeline (branch per task, dev round, review with merge).
+- **AC-15:** An ambiguous message, or one that maps to no item, causes the main agent to ask the user for clarification via `ask_user` before any board or git change.
+- **AC-16:** The extension tests cover both retrieval paths: argument parsing (bare vs message), the bare-mode single-element selection via `kb next`, and the content of the kickoff template (operational interpretation, item identification, ask-first rule, DAG order).
+
+### Dependencies and constraints
+
+- Depends on: v0.1.0 in full (FR-1..FR-8, `lib/git.ts`, `lib/orchestration.ts`), `pi.sendUserMessage` (already used by `/kb-plan`), the `ask_user` tool, `kb next` exit codes (2 = nothing available).
+- Board structure: this version is planned as a new epic containing a single story; the epic **blocks KB-11** (v0.1.0 epic) **and KB-1** (v0.2.0 epic), so their remaining items are not available to `/kb-dev` until this change is done — the new retrieval logic must therefore be in place first.
+- Constraints: the handler stays deterministic TypeScript; the main agent only receives the fixed kickoff template plus the user message; subagent prompts and `kb guide` rules remain authoritative.
+
+### Priorities
+
+1. FR-9 (bare-mode board-level retrieval) — the default path.
+2. FR-10 (message mode) — steering on demand.
+3. AC-16 (tests) for both.
+
+### Out of scope
+
+- Any change to the per-task machinery: prompts of the subagents, task prompt templates, retry policy, merge chain, kb-qa behavior, model resolution (KB-7/KB-8 stay as planned in their own epic).
+- Any change to `/kb-plan`, the `kb` CLI, the plan format or the board rules.
+- Working more than one element per bare invocation, or interactive item selection in bare mode.
