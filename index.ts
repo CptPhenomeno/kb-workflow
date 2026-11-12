@@ -5,11 +5,13 @@
  *   /kb-plan [idea]  Interactive analysis with the user (via the ask_user tool),
  *                    then SPEC.md is written/versioned at the project root and the
  *                    kb-planner subagent turns it into plan.yaml + kb board import.
- *   /kb-dev          Completes pending reviews, then works the next available
- *                    board-level element (kb next): a kb-developer subagent
- *                    implements it (kb resolves the DAG via blockers), then a
- *                    kb-reviewer subagent reviews and merges it. One element per
- *                    invocation.
+ *   /kb-dev [msg]    Completes pending reviews, then either works the next
+ *                    available board-level element (kb next): a kb-developer
+ *                    subagent implements it (kb resolves the DAG via blockers),
+ *                    then a kb-reviewer subagent reviews and merges it — one
+ *                    element per invocation; or, with a message argument,
+ *                    delivers the message to the main agent as a kickoff that
+ *                    identifies and works the pertinent items in DAG order.
  *
  * Tools (callable by the LLM):
  *   ask_user         Ask the user a question (input / select / multi-select).
@@ -31,6 +33,7 @@ import { loadKbWorkflowConfig, resolveAgentModel, type AgentRole } from "./lib/c
 import { kbErrorMessage, runKb, type KbItem } from "./lib/kb.ts";
 import { preFlightCheck } from "./lib/git.ts";
 import { runBareDev, type BareModeResult } from "./lib/bare-mode.ts";
+import { runMessageDev, type MessageModeResult } from "./lib/message-mode.ts";
 import { actorForAgent, runSubagent, type KbAgentName } from "./lib/subagent.ts";
 
 const AgentParam = StringEnum(["kb-planner", "kb-developer", "kb-reviewer"] as const, {
@@ -252,12 +255,13 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 	});
 
 	// ---------------------------------------------------------------------------
-	// Command: /kb-dev — one board-level element per invocation (FR-9).
+	// Command: /kb-dev [message] — bare mode works one board-level element per
+	// invocation (FR-9); message mode delivers a kickoff to the main agent (FR-10).
 	// ---------------------------------------------------------------------------
 	pi.registerCommand("kb-dev", {
 		description:
-			"Work the next available kb element (kb next, board level): a kb-developer subagent implements it (kb resolves the DAG via blockers), then a kb-reviewer subagent reviews and merges it; items left in review are completed first",
-		handler: async (_args, ctx) => {
+			"Work the next available kb element (kb next, board level): a kb-developer subagent implements it (kb resolves the DAG via blockers), then a kb-reviewer subagent reviews and merges it; items left in review are completed first. With a message argument, the message is delivered to the main agent as a kickoff that identifies and works the pertinent items in DAG order",
+		handler: async (args, ctx) => {
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("The agent is busy; try again when idle.", "warning");
 				return;
@@ -300,26 +304,53 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 				return story ?? null;
 			};
 
-			// Bare mode (FR-9): pending reviews first, then the next board-level
-			// element via `kb next`, worked through its full cycle, then stop.
-			ctx.ui.setStatus("kb-dev", "running");
-			let result: BareModeResult;
-			try {
-				result = await runBareDev({
+		const message = args.trim();
+		const spawnReviewer = (item: KbItem) =>
+			runSubagent({ agent: "kb-reviewer", cwd, model: revModel, task: reviewTask(item) });
+
+		ctx.ui.setStatus("kb-dev", "running");
+		let report: string;
+		let delivered = true;
+		try {
+			if (message) {
+				// Message mode (FR-10): pending reviews first, then the message
+				// is handed to the main agent as a kickoff; the handler itself
+				// performs no other board or git action (FR-10 step 4).
+				const result: MessageModeResult = await runMessageDev({
 					cwd,
-					kb: (args) => runKb(args, cwd),
+					message,
+					kb: (a) => runKb(a, cwd),
+					preFlight: () => preFlightCheck(cwd),
+					spawnReviewer,
+					sendUserMessage: (text) => pi.sendUserMessage(text),
+					notify: (msg, level) => ctx.ui.notify(msg, level),
+					setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
+				});
+				report = result.report;
+				delivered = result.delivered;
+			} else {
+				// Bare mode (FR-9): pending reviews first, then the next board-level
+				// element via `kb next`, worked through its full cycle, then stop.
+				const result: BareModeResult = await runBareDev({
+					cwd,
+					kb: (a) => runKb(a, cwd),
 					spawnDev: async (task) =>
 						runSubagent({ agent: "kb-developer", cwd, model: devModel, task: devTask(task, await storyOf(task)) }),
-					spawnReviewer: (item) => runSubagent({ agent: "kb-reviewer", cwd, model: revModel, task: reviewTask(item) }),
-					notify: (message, level) => ctx.ui.notify(message, level),
-				setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
+					spawnReviewer,
+					notify: (msg, level) => ctx.ui.notify(msg, level),
+					setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
 				});
-			} finally {
-				ctx.ui.setStatus("kb-dev", undefined);
+				report = result.report;
 			}
+		} finally {
+			ctx.ui.setStatus("kb-dev", undefined);
+		}
 
-			ctx.ui.notify("Finished the /kb-dev run. See the report in chat.", "info");
-			pi.sendMessage({ customType: "kb-workflow", content: result.report, display: true });
+		ctx.ui.notify(
+			delivered ? "Finished the /kb-dev run. See the report in chat." : "/kb-dev aborted; see the report in chat.",
+			"info",
+		);
+		pi.sendMessage({ customType: "kb-workflow", content: report, display: true });
 		},
 	});
 }

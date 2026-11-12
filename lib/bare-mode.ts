@@ -61,25 +61,39 @@ const reportRound = (report: string[], kind: string, item: KbItem, r: AgentRound
 	if (!r.ok) report.push(`  error: ${r.errorMessage ?? ""} ${r.stderr.trim().slice(0, 300)}`);
 };
 
+/**
+ * Complete the review of any items already sitting in the `review` column:
+ * board-wide, one kb-reviewer round per item, in deterministic order
+ * (position, then id). Shared by both retrieval modes (FR-9 step 1 and
+ * FR-10 step 2, NFR-6). Returns the swept items.
+ */
+export async function sweepPendingReviews(
+	deps: Pick<BareModeDeps, "kb" | "spawnReviewer" | "setStatus">,
+	report: string[],
+): Promise<KbItem[]> {
+	const reviewRes = await deps.kb(["list", "--status", "review"]);
+	if (reviewRes.code !== 0) {
+		report.push(`- listing review items failed: ${kbErrorMessage(reviewRes)}`);
+		return [];
+	}
+	const reviewItems = ((reviewRes.json as KbItem[] | undefined) ?? [])
+		.filter((i) => i.status === "review")
+		.sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
+	for (const item of reviewItems) {
+		deps.setStatus?.(`review ${item.id}`);
+		const rev = await deps.spawnReviewer(item);
+		reportRound(report, "review", item, rev);
+	}
+	return reviewItems;
+}
+
 export async function runBareDev(deps: BareModeDeps): Promise<BareModeResult> {
 	const report: string[] = ["# /kb-dev report — board-level run", ""];
 	const notify = deps.notify ?? (() => {});
 
 	// 1. Complete the review of items already sitting in the review column,
 	//    board-wide, one kb-reviewer round per item (FR-9 step 1, AC-13).
-	const reviewRes = await deps.kb(["list", "--status", "review"]);
-	if (reviewRes.code === 0) {
-		const reviewItems = ((reviewRes.json as KbItem[] | undefined) ?? [])
-			.filter((i) => i.status === "review")
-			.sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
-		for (const item of reviewItems) {
-			deps.setStatus?.(`review ${item.id}`);
-			const rev = await deps.spawnReviewer(item);
-			reportRound(report, "review", item, rev);
-		}
-	} else {
-		report.push(`- listing review items failed: ${kbErrorMessage(reviewRes)}`);
-	}
+	await sweepPendingReviews(deps, report);
 
 	// 2. Resolve the next element at board level (FR-9 step 2, AC-11).
 	const next = await deps.kb(["next"]);
