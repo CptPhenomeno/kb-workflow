@@ -1,8 +1,20 @@
 {
 	"kb-agents": {
-		"planner": { "model": "anthropic/claude-sonnet-4-5", "thinking-level": "high" },
-		"developer": { "model": "anthropic/claude-haiku-4-5", "thinking-level": "medium" },
-		"reviewer": { "model": "anthropic/claude-sonnet-4-5", "thinking-level": "low" },
-		"qa": { "model": "anthropic/claude-sonnet-4-5", "thinking-level": "low" }
+		"planner": {
+			"model": "anthropic/claude-sonnet-4-5",
+			"thinking-level": "high"
+		},
+		"developer": {
+			"model": "anthropic/claude-haiku-4-5",
+			"thinking-level": "high"
+		},
+		"reviewer": {
+			"model": "anthropic/claude-sonnet-4-5",
+			"thinking-level": "high"
+		},
+		"qa": {
+			"model": "anthropic/claude-sonnet-4-5",
+			"thinking-level": "high"
+		}
 	}
 }
