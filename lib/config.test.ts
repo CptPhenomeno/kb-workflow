@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	mergeKbAgents,
 	parseKbAgents,
 	parseThinkingLevel,
 	resolveAgentModel,
@@ -87,4 +88,44 @@ test("new-format config resolves model and thinking-level per role", () => {
 	// While the old models shape is still loaded by config-load.ts (until
 	// KB-5), resolveAgentModel keeps honoring it so the runtime keeps working.
 	assert.equal(resolveAgentModel("reviewer", { models: { reviewer: "old/m" } }, "s/m"), "old/m");
+});
+
+test("role takes model from global and thinking-level from project when each defines only one", () => {
+	const global = parseKbAgents({ "kb-agents": { planner: { model: "g/planner" } } });
+	const project = parseKbAgents({ "kb-agents": { planner: { "thinking-level": "high" } } });
+	const merged = mergeKbAgents(global, project);
+	assert.equal(merged.planner?.model, "g/planner");
+	assert.equal(merged.planner?.thinkingLevel, "high");
+});
+
+test("role takes model from project and thinking-level from global when each defines only one", () => {
+	const global = parseKbAgents({ "kb-agents": { qa: { "thinking-level": "low" } } });
+	const project = parseKbAgents({ "kb-agents": { qa: { model: "p/qa" } } });
+	const merged = mergeKbAgents(global, project);
+	assert.equal(merged.qa?.model, "p/qa");
+	assert.equal(merged.qa?.thinkingLevel, "low");
+});
+
+test("merge covers all four roles and project wins per property", () => {
+	const global = parseKbAgents({
+		"kb-agents": {
+			planner: { model: "g/planner", "thinking-level": "high" },
+			developer: { model: "g/dev", "thinking-level": "medium" },
+			reviewer: { model: "g/reviewer", "thinking-level": "low" },
+			qa: { model: "g/qa", "thinking-level": "low" },
+		},
+	});
+	const project = parseKbAgents({
+		"kb-agents": {
+			planner: { model: "p/planner" },
+			developer: { "thinking-level": "high" },
+		},
+	});
+	const merged = mergeKbAgents(global, project);
+	assert.equal(merged.planner?.model, "p/planner"); // project overrides the same property
+	assert.equal(merged.planner?.thinkingLevel, "high"); // untouched property survives
+	assert.equal(merged.developer?.model, "g/dev");
+	assert.equal(merged.developer?.thinkingLevel, "high");
+	assert.deepEqual(merged.reviewer, { model: "g/reviewer", thinkingLevel: "low" });
+	assert.deepEqual(merged.qa, { model: "g/qa", thinkingLevel: "low" });
 });

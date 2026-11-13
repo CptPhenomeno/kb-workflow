@@ -92,6 +92,30 @@ export function parseKbAgents(raw: unknown): KbAgentsConfig {
 	return result;
 }
 
+/**
+ * Deep per-property merge of two parsed configs (project wins per property, FR-18).
+ * For each of the four roles, `model` and `thinkingLevel` are merged independently,
+ * so a role may take its model from one file and its thinking level from the other,
+ * in both directions.
+ */
+export function mergeKbAgents(global: KbAgentsConfig, project: KbAgentsConfig): KbAgentsConfig {
+	const merged: KbAgentsConfig = {};
+	for (const role of AGENT_ROLES) {
+		const g = global[role];
+		const p = project[role];
+		if (!g && !p) continue;
+		const roleConfig: RoleConfig = { ...g };
+		if (p) {
+			roleConfig.model = p.model ?? roleConfig.model;
+			roleConfig.thinkingLevel = p.thinkingLevel ?? roleConfig.thinkingLevel;
+		}
+		if (roleConfig.model !== undefined || roleConfig.thinkingLevel !== undefined) {
+			merged[role] = roleConfig;
+		}
+	}
+	return merged;
+}
+
 /** Resolve the model for a role; falls back to the caller's active model when unset. */
 export function resolveAgentModel(role: AgentRole, config: KbWorkflowConfig, fallback?: string): string | undefined {
 	return config.kbAgents?.[role]?.model ?? config.models?.[role] ?? fallback;
