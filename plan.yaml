@@ -124,8 +124,8 @@ items:
             priority: medium
             points: 2
             tests:
-              - kb next --type story drives retrieval, one story per invocation
-              - story task loop follows DAG order via kb next --parent
+              - FR-12 sweep completes pending reviews before the story loop; report covers the full story run
+              - reviewer failure mid-story stops the story loop before the next task
 
   # ------------------------------------------------- updated existing items
   - ref: dev-handler-story-review          # KB-21
@@ -231,3 +231,30 @@ items:
       - AC-10 suite passes locally with git available
     tests:
       - all-branches-merged verification gates deletion
+
+  # ---------------------------------------------------------------- v0.1.3 task
+  - ref: config-location
+    type: task
+    title: kb-workflow.json is read from the extension folder, not the agents folder
+    description: |
+      The installed extension ships kb-workflow.json in its own folder
+      (e.g. ~/.pi/agent/extensions/kb-workflow/kb-workflow.json), but
+      loadKbWorkflowConfig looks for the global config in the agents
+      folder via getAgentDir() — a file that does not exist. The shipped
+      config is silently ignored and every role falls back to the
+      session model.
+      FR-15: read the global config from the extension's own folder,
+      resolved module-relative at runtime (e.g. via import.meta.url);
+      keep the project-local .pi/kb-workflow.json override; remove the
+      getAgentDir() lookup entirely — no fallback. NFR-11: the loader
+      must work identically from source and from the installed folder.
+      Done when AC-22 holds.
+    priority: high
+    points: 2
+    blocks: [thinking-config]
+    acceptance:
+      - AC-22 loader reads kb-workflow.json from the extension's own folder (module-relative); a config there takes effect; an agents-folder file is ignored; the project-local .pi override still wins per property
+    tests:
+      - loader reads the config from the extension folder (module-relative)
+      - agents-folder config is ignored
+      - project-local .pi override still wins per property

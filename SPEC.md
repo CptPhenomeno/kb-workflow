@@ -2,6 +2,40 @@
 
 This document specifies the `kb-workflow` pi extension: the `/kb-plan` and `/kb-dev` commands and the kb-planner / kb-developer / kb-reviewer / kb-qa subagents that drive the `kb` kanban board end to end. Each section is one version of the extension, **ordered newest first** (keepachangelog style): a new version is inserted at the top; existing sections are never rewritten.
 
+## v0.1.3 — 2026-11-13
+
+Changes vs v0.1.2: the global `kb-workflow.json` moves home. The loader reads it from the **extension's own folder** (where the extension code lives and the file is shipped) instead of the agents folder (`getAgentDir()`). The agents-folder lookup is removed entirely.
+
+### Goal and context
+
+The installed extension ships `kb-workflow.json` in its own folder (e.g. `~/.pi/agent/extensions/kb-workflow/kb-workflow.json`), but `loadKbWorkflowConfig` looks for the global config in the agents folder (`~/.pi/agent/kb-workflow.json`) — a file that does not exist. The shipped config is silently ignored and every role falls back to the session model. The config must be read where the extension actually ships it.
+
+### Functional requirements
+
+**FR-15 — Config file location.** `loadKbWorkflowConfig` must read:
+1. the global config from the **extension's own folder** — the folder containing the extension code, resolved relative to the module at runtime (e.g. via `import.meta.url`), never via `getAgentDir()`;
+2. the project-local override from `<project>/.pi/kb-workflow.json` (unchanged).
+
+The agents-folder lookup (`getAgentDir()/kb-workflow.json`) is removed entirely — no fallback. The merge rules and every other loading behavior are unchanged.
+
+### Non-functional requirements
+
+- **NFR-11 (source parity):** the loader must work identically when the extension runs from the repo (source) and from the installed folder: the path is always derived from the module location, never hard-coded.
+
+### Acceptance criteria
+
+- **AC-22:** the loader reads `kb-workflow.json` from the extension's own folder (module-relative); a config placed there takes effect; a file in the agents folder is ignored; the project-local `.pi` override still wins per property.
+
+### Dependencies and constraints
+
+- This change **blocks the v0.2.0 epic (KB-1)**: the config rework (kb-agents shape, per-role model and thinking-level resolution) must land on the corrected loading path.
+- Compatible with both config shapes: the old `models` shape (current) and the `kb-agents` shape (v0.2.0 redo).
+
+### Out of scope
+
+- Any change to the config format (that is the v0.2.0 redo, KB-6..KB-10).
+- Any additional fallback path.
+
 ## v0.1.2 — 2026-11-13
 
 Changes vs v0.1.1: two things. First, the format of this document: version sections are now ordered newest-first (keepachangelog style) — new versions are inserted at the top instead of appended at the end. Second, the bare invocation of `/kb-dev` returns to story granularity — resolved by the kb DAG via an epic-scoped fallback chain (`kb next --type epic` → `kb next --type story --parent <epic>`, then board-wide story, then single task) — and the story/epic review routing is pinned down with one uniform trigger: kb-reviewer reviews tasks and subtasks, kb-qa reviews stories and epics. Task-branch merging stays with kb-reviewer (FR-4 unchanged).
