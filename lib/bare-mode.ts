@@ -5,11 +5,15 @@
  *   1. completes the review of any items already sitting in the `review`
  *      column, routed by type (FR-12): tasks/subtasks to kb-reviewer,
  *      stories/epics to kb-qa;
- *   2. resolves the next element with `kb next` at board level (no --parent
- *      filter) — first available task or bug per the kb DAG;
- *   3. works exactly that one element through its full cycle (FR-2 branch
- *      per task via runDeveloperRound, developer round with the existing
- *      retry policy, kb-reviewer round with the FR-4 merge chain) and stops.
+ *   2. resolves the unit of work with the FR-11 chain (epic-scoped
+ *      story → board-wide story → single task/bug);
+ *   3. works the unit: a story in full — each of its tasks, in DAG order
+ *      (`kb next --parent <story>` until exit 2), through the full cycle
+ *      (FR-2 branch per task via runDeveloperRound, developer round with
+ *      the existing retry policy, kb-reviewer round with the FR-4 merge
+ *      chain), with the FR-13 kb-qa rounds for the story (and, if all
+ *      sibling stories are done, the epic) — or the single fallback
+ *      task/bug through its one cycle; then stops.
  *
  * If `kb next` exits 2 (nothing available), the user is notified and no
  * action is taken. The handler adds no own ordering (NFR-7): the kb DAG
@@ -200,6 +204,79 @@ export async function resolveUnit(
 	return null;
 }
 
+/**
+ * One task's full cycle shared by the story loop and the task/bug
+ * fallback (FR-2 branch via runDeveloperRound, developer round with the
+ * existing retry policy, FR-4 review round with the merge chain inside
+ * the reviewer). Returns true when the task completed its cycle.
+ */
+async function runTaskCycle(
+	deps: BareModeDeps,
+	report: string[],
+	task: KbItem,
+	what: string,
+): Promise<boolean> {
+	let devOk = false;
+	for (let attempt = 1; attempt <= MAX_DEV_TRIES && !devOk; attempt++) {
+		deps.setStatus?.(`dev ${task.id} (try ${attempt})`);
+		const round = await runDeveloperRound({
+			cwd: deps.cwd,
+			task,
+			spawnDev: () => deps.spawnDev(task),
+		});
+		const dev = round.result;
+		devOk = dev.ok;
+		report.push(
+			`- dev ${task.id} "${task.title}" (try ${attempt}, branch ${round.branch}): ${dev.ok ? "ok" : "FAILED"} — ${lastLine(dev.output)}`,
+		);
+		if (!dev.ok) report.push(`  error: ${dev.errorMessage ?? ""} ${dev.stderr.trim().slice(0, 300)}`);
+	}
+	if (!devOk) {
+		report.push(`- ${what} ${task.id} not completed after ${MAX_DEV_TRIES} tries; stopping.`);
+		return false;
+	}
+
+	// FR-4 review round for the task (merge chain inside the reviewer).
+	deps.setStatus?.(`review ${task.id}`);
+	const rev = await deps.spawnReviewer(task);
+	reportRound(report, "review", task, rev);
+	return true;
+}
+
+/**
+ * Work a whole story (FR-11 "worked in full"): for each of its tasks, in
+ * DAG order (`kb next --parent <story>` until exit 2), run the full
+ * existing cycle — FR-2 branch per task via runDeveloperRound, developer
+ * round with the existing retry policy, FR-4 review with merge. After each
+ * task's review, qaRoundsOnCompletion walks the story → epic ancestry, so
+ * the kb-qa story review (and, if all sibling stories are done, the epic
+ * review) fires within the loop (FR-13). Returns the tasks worked.
+ */
+export async function runStoryLoop(
+	deps: BareModeDeps,
+	report: string[],
+	story: KbItem,
+): Promise<KbItem[]> {
+	const worked: KbItem[] = [];
+	for (;;) {
+		const res = await deps.kb(["next", "--parent", story.id]);
+		if (res.code === 2) break; // no more tasks: the story is worked in full
+		if (res.code !== 0) {
+			report.push(`- kb next --parent ${story.id} failed: ${kbErrorMessage(res)}`);
+			break;
+		}
+		const task = res.json as KbItem;
+
+		if (!(await runTaskCycle(deps, report, task, "task"))) break;
+		worked.push(task);
+
+		// FR-13: if the parent story reached `review` with this task done
+		// (and in turn the epic), spawn the kb-qa rounds.
+		await qaRoundsOnCompletion(deps, report, task.id);
+	}
+	return worked;
+}
+
 export async function runBareDev(deps: BareModeDeps): Promise<BareModeResult> {
 	const report: string[] = ["# /kb-dev report — board-level run", ""];
 	const notify = deps.notify ?? (() => {});
@@ -221,40 +298,32 @@ export async function runBareDev(deps: BareModeDeps): Promise<BareModeResult> {
 		return { report: report.join("\n") };
 	}
 	const element = resolved.unit;
-	if (element.type === "story" || element.type === "epic") {
-		// The story is the unit of work; its task loop (FR-11 "worked in
-		// full") is driven by the story loop.
+	if (element.type === "story") {
+		// The story is the unit of work; it is worked in full (FR-11), one
+		// story per invocation.
 		report.push(
-			`- resolved unit: ${element.type} ${element.id} "${element.title}" (${resolved.via}); one ${element.type} per invocation.`,
+			`- resolved unit: story ${element.id} "${element.title}" (${resolved.via}); one story per invocation.`,
+		);
+		const worked = await runStoryLoop(deps, report, element);
+		report.push(`- story ${element.id}: ${worked.length} task(s) worked.`);
+		const show = await deps.kb(["show", element.id]);
+		const now = (show.code === 0 ? show.json : undefined) as KbItem | undefined;
+		if (now) report.push("", `Story ${now.id} is now in column "${now.status}".`);
+		return { report: report.join("\n") };
+	}
+	if (element.type === "epic") {
+		// The epic only scopes which story is taken; it is never worked
+		// directly (one story per invocation).
+		report.push(
+			`- resolved unit: epic ${element.id} "${element.title}" (${resolved.via}); one story per invocation.`,
 		);
 		return { report: report.join("\n") };
 	}
 
 	// 3. Work exactly that one element through its full cycle, then stop.
-	let devOk = false;
-	for (let attempt = 1; attempt <= MAX_DEV_TRIES && !devOk; attempt++) {
-		deps.setStatus?.(`dev ${element.id} (try ${attempt})`);
-		const round = await runDeveloperRound({
-			cwd: deps.cwd,
-			task: element,
-			spawnDev: () => deps.spawnDev(element),
-		});
-		const dev = round.result;
-		devOk = dev.ok;
-		report.push(
-			`- dev ${element.id} "${element.title}" (try ${attempt}, branch ${round.branch}): ${dev.ok ? "ok" : "FAILED"} — ${lastLine(dev.output)}`,
-		);
-		if (!dev.ok) report.push(`  error: ${dev.errorMessage ?? ""} ${dev.stderr.trim().slice(0, 300)}`);
-	}
-	if (!devOk) {
-		report.push(`- element ${element.id} not completed after ${MAX_DEV_TRIES} tries; stopping.`);
+	if (!(await runTaskCycle(deps, report, element, "element"))) {
 		return { report: report.join("\n") };
 	}
-
-	// FR-4 review round for the element (merge chain inside the reviewer).
-	deps.setStatus?.(`review ${element.id}`);
-	const rev = await deps.spawnReviewer(element);
-	reportRound(report, "review", element, rev);
 
 	// FR-13: if the parent story (and in turn the epic) reached `review` with
 	// this task done, spawn the kb-qa rounds derived from the board state.

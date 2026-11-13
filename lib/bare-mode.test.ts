@@ -496,6 +496,7 @@ test("available epic scopes the story resolved via kb next --type story --parent
 	assert.deepEqual(script.calls.filter((c) => c[0] === "next"), [
 		["next", "--type", "epic"],
 		["next", "--type", "story", "--parent", "KB-1"],
+		["next", "--parent", "KB-8"],
 	]);
 	// the scoped story is the resolved unit; no board-wide story query ran
 	assert.ok(!script.calls.some((c) => c.join(" ") === "next --type story"));
@@ -544,6 +545,7 @@ test("with no epic or empty scoped query, the story is resolved board-wide via k
 		["next", "--type", "epic"],
 		["next", "--type", "story", "--parent", "KB-2"],
 		["next", "--type", "story"],
+		["next", "--parent", "KB-9"],
 	]);
 	assert.ok(resultB.report.includes("KB-9"));
 });
@@ -627,6 +629,174 @@ test("nothing available at any level notifies the user without side effects", as
 	// no board mutation and no task/branch side effects via kb
 	assert.ok(script.calls.every((c) => c[0] === "list" || c[0] === "next"));
 	assert.ok(/nothing available/i.test(result.report));
+});
+
+// --- KB-35: FR-11 story loop (whole story per invocation) ---
+
+/**
+ * Script the story loop: `next --parent <story>` pops tasks from a queue
+ * (exit 2 when empty); typed queries resolve the story board-wide. The
+ * story's `show` status flips to `review` once the task queue is empty
+ * (all tasks done), the epic's when `epicReview` is set.
+ */
+function storyLoopScript(opts: {
+	story: KbItem;
+	epic: KbItem;
+	tasks: KbItem[];
+	/** The story flips to `review` when the task queue empties. */
+	storyReview?: boolean;
+	epicReview?: boolean;
+}) {
+	const queue = [...opts.tasks];
+	const showStory = (id: string): KbRun => {
+		if (id === opts.story.id) {
+			const status = !queue.length && opts.storyReview ? "review" : opts.story.status;
+			return kbRun({ ...opts.story, status });
+		}
+		if (id === opts.epic.id) {
+			return kbRun({ ...opts.epic, status: opts.epicReview ? "review" : opts.epic.status });
+		}
+		const task = opts.tasks.find((t) => t.id === id);
+		return task ? kbRun({ ...task, status: "done" }) : kbRun({ error: "not found" }, 2);
+	};
+	return {
+		calls: [] as string[][],
+		responses: new Map<string, (args: string[]) => KbRun>([
+			["list", () => kbRun([])],
+			[
+				"next",
+				(args) => {
+					if (args.includes("--parent")) {
+						const next = queue.shift();
+						return next ? kbRun(next) : notFound();
+					}
+					return chainNext({ story: opts.story })(args);
+				},
+			],
+			["show", (args) => showStory(args[1])],
+		]),
+	};
+}
+
+function storyLoopDeps(dir: string, script: ScriptedKb, events: string[]) {
+	return {
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnDev: async (i: KbItem) => {
+			events.push(`dev ${i.id}`);
+			return okAgent(`implemented ${i.id}`);
+		},
+		spawnReviewer: async (i: KbItem) => {
+			events.push(`reviewer ${i.id}`);
+			return okAgent(`reviewed ${i.id}; merged feature/${i.id} into develop`);
+		},
+		spawnQa: async (i: KbItem) => {
+			events.push(`qa ${i.id}`);
+			return okAgent(`qa ${i.id} OK — verified merged branches; deleted feature/KB-13 feature/KB-14`);
+		},
+	} as const;
+}
+
+test("each story task runs the full branch/develop/review/merge cycle in DAG order", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const epic = item("KB-1", "epic", "doing", null);
+	const t1 = item("KB-13", "task", "todo", "KB-8");
+	const t2 = item("KB-14", "task", "todo", "KB-8");
+	const script = storyLoopScript({ story, epic, tasks: [t1, t2] });
+
+	const events: string[] = [];
+	const result = await runBareDev(storyLoopDeps(dir, script, events));
+
+	// both tasks of the story are worked in DAG order, each through its
+	// full dev → review cycle
+	assert.deepEqual(events, ["dev KB-13", "reviewer KB-13", "dev KB-14", "reviewer KB-14"]);
+	// the task loop is driven by kb next --parent <story> until exit 2
+	const parentCalls = script.calls.filter((c) => c.includes("--parent"));
+	assert.equal(parentCalls.length, 3);
+	assert.ok(parentCalls.every((c) => c.join(" ") === "next --parent KB-8"));
+	// the report lists every task worked with its branch and merge outcome (NFR-4)
+	assert.ok(result.report.includes("branch feature/KB-13"));
+	assert.ok(result.report.includes("branch feature/KB-14"));
+	assert.ok(result.report.includes("merged feature/KB-13 into develop"));
+	assert.ok(result.report.includes("merged feature/KB-14 into develop"));
+});
+
+test("story reaching review after all tasks spawns the kb-qa story review", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const epic = item("KB-1", "epic", "doing", null);
+	const t1 = item("KB-13", "task", "todo", "KB-8");
+	const t2 = item("KB-14", "task", "todo", "KB-8");
+	const script = storyLoopScript({ story, epic, tasks: [t1, t2], storyReview: true });
+
+	const events: string[] = [];
+	const result = await runBareDev(storyLoopDeps(dir, script, events));
+
+	// after the last task's review the story sits in review: the kb-qa
+	// story round fires within the story loop; the epic is still doing,
+	// so no epic round
+	assert.deepEqual(events, [
+		"dev KB-13",
+		"reviewer KB-13",
+		"dev KB-14",
+		"reviewer KB-14",
+		"qa KB-8",
+	]);
+	assert.ok(result.report.includes("qa review KB-8"));
+	assert.ok(!result.report.includes("qa review KB-1"));
+});
+
+test("epic reaching review after all sibling stories spawns the kb-qa epic review", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const epic = item("KB-1", "epic", "doing", null);
+	const t1 = item("KB-13", "task", "todo", "KB-8");
+	const t2 = item("KB-14", "task", "todo", "KB-8");
+	const script = storyLoopScript({ story, epic, tasks: [t1, t2], storyReview: true, epicReview: true });
+
+	const events: string[] = [];
+	const result = await runBareDev(storyLoopDeps(dir, script, events));
+
+	// story round first, then the epic round (all sibling stories done)
+	assert.deepEqual(events, [
+		"dev KB-13",
+		"reviewer KB-13",
+		"dev KB-14",
+		"reviewer KB-14",
+		"qa KB-8",
+		"qa KB-1",
+	]);
+	assert.ok(result.report.includes("qa review KB-8"));
+	assert.ok(result.report.includes("qa review KB-1"));
+});
+
+test("invocation stops after the story and any epic review", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const epic = item("KB-1", "epic", "doing", null);
+	const t1 = item("KB-13", "task", "todo", "KB-8");
+	const t2 = item("KB-14", "task", "todo", "KB-8");
+	const script = storyLoopScript({ story, epic, tasks: [t1, t2], storyReview: true, epicReview: true });
+
+	const events: string[] = [];
+	await runBareDev(storyLoopDeps(dir, script, events));
+
+	// one story per invocation: after the story (and epic) qa rounds no
+	// further unit is resolved — the only board-level next queries are the
+	// FR-11 chain queries that resolved the story
+	const boardNext = script.calls.filter((c) => c[0] === "next" && !c.includes("--parent"));
+	assert.deepEqual(boardNext, [["next", "--type", "epic"], ["next", "--type", "story"]]);
+	// the invocation ends with the epic qa round
+	assert.equal(events[events.length - 1], "qa KB-1");
 });
 
 test("bare invocation with no story available notifies the user without side effects", async (t) => {
