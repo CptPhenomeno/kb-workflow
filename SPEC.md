@@ -2,6 +2,75 @@
 
 This document specifies the `kb-workflow` pi extension: the `/kb-plan` and `/kb-dev` commands and the kb-planner / kb-developer / kb-reviewer / kb-qa subagents that drive the `kb` kanban board end to end. Each section is one version of the extension, **ordered newest first** (keepachangelog style): a new version is inserted at the top; existing sections are never rewritten.
 
+## v0.2.0 — 2026-11-13
+
+Changes vs v0.1.3: per-agent **thinking level** configuration. The config format becomes `kb-agents` (per-role objects with `model` and `thinking-level`); the old `models` format is no longer supported. `--model` and `--thinking` are forwarded to the spawned subagents independently, with the session's thinking level always forwarded as fallback. This section lands the work originally specced on 2026-11-11 on the reference branch `feature/kb-agents-thinking-config`, redone on top of v0.1.3 — it now includes the fourth `qa` role and the extension-folder config location.
+
+### Goal and context
+
+Today only the **model** is configurable per role; the thinking level of the dispatching session is forwarded only when the model is inherited — an explicit model silently drops the session's thinking level. The user wants explicit per-role control over both properties. The config now also covers the fourth role (kb-qa) and is read from the extension folder (FR-15).
+
+### Actors
+
+- **Extension user** — edits `kb-workflow.json` (extension folder and/or project-local `.pi/kb-workflow.json`).
+- **kb subagents** — `kb-planner`, `kb-developer`, `kb-reviewer`, `kb-qa`, spawned by the `kb_agent` tool and the `/kb-dev` command.
+
+### Functional requirements
+
+**FR-16 — New config format (`kb-agents`).** The config JSON replaces the `models` object with `kb-agents`; each of the four roles becomes an object with two optional properties:
+
+```json
+{
+	"kb-agents": {
+		"planner":   { "model": "provider/model", "thinking-level": "high" },
+		"developer": { "model": "provider/model", "thinking-level": "medium" },
+		"reviewer":  { "model": "provider/model", "thinking-level": "low" },
+		"qa":        { "model": "provider/model", "thinking-level": "low" }
+	}
+}
+```
+
+**FR-17 — Breaking change.** The old `models` format is no longer supported: a config file without a valid `kb-agents` object contributes nothing to the resolution (silently ignored, consistent with the existing behavior for malformed files). Note: since v0.1.3 the shipped config IS read — the repo's and installed `kb-workflow.json` must be rewritten together with this change (FR-22), otherwise every role silently falls back to the session model.
+
+**FR-18 — Config resolution and deep merge.** Same file locations and order as FR-15 (extension folder global + project-local `.pi` override, later wins). The two files merge **deeply, per single property**: for each role, `model` and `thinking-level` are merged independently (e.g. the model from one file with the thinking level from the other).
+
+**FR-19 — thinking-level validation.** `thinking-level` accepts only the thinking levels recognized by pi: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. An unknown value is ignored (treated as unset) and the fallback applies; it never causes a hard failure.
+
+**FR-20 — Fallback rules.** `model` unset for a role → the subagent inherits the model active in the dispatching pi session. `thinking-level` unset (or invalid) → the subagent inherits the thinking level of the dispatching pi session; **this is always forwarded, including when the model is explicitly configured** — a deliberate change from the current behavior where an explicit model implied the model's default thinking level.
+
+**FR-21 — Subagent invocation.** `runSubagent` builds the `pi` CLI args so that `--model` and `--thinking` are passed independently of each other, according to the per-role resolution above (`resolveAgentConfig` returns both properties; the dispatchers in `index.ts` use it).
+
+**FR-22 — Documentation and config rewrite.** `README.md` ("Model configuration" section), the header comment of `index.ts`, `kb-workflow.example.json`, and the repo's own `kb-workflow.json` are rewritten in the new format.
+
+### Non-functional requirements
+
+- **NFR-12 (robustness):** malformed or non-conforming config files must never crash the extension; they are ignored.
+- **NFR-13 (no new dependencies):** only the existing pi packages (pi-agent-core's `ThinkingLevel` type may be referenced).
+- **NFR-14 (testability):** `lib/config.ts` stays a pure module; the existing suite (`lib/*.test.ts`) covers the new shape, the deep merge, the validation, the fallback rules and the forwarding.
+
+### Acceptance criteria
+
+- **AC-23:** a config file in the new format is loaded and, for each role, `model` and `thinking-level` are resolved and passed to the spawned `pi` process as `--model` / `--thinking` respectively.
+- **AC-24:** a config file in the old `models` format is ignored entirely (no role resolution from it; fallbacks apply).
+- **AC-25:** extension-folder and project configs merge per property: a role defined in both files takes `model` from one and `thinking-level` from the other when each file defines only one of the two.
+- **AC-26:** a `thinking-level` outside the allowed set is ignored and the session's thinking level is forwarded instead.
+- **AC-27:** a role that defines only `model` spawns with both `--model <configured>` and `--thinking <session level>`.
+- **AC-28:** a role fully absent from the config inherits the session's model and thinking level.
+- **AC-29:** the `qa` role is resolved like the other three.
+- **AC-30:** `README.md`, the `index.ts` header comment, `kb-workflow.example.json` and the repo's `kb-workflow.json` document/show the new `kb-agents` format.
+
+### Dependencies and constraints
+
+- Depends on: FR-15 (config location), the pi CLI flags `--model` / `--thinking` of the spawned `pi` process, the pure-module split (`lib/config.ts` / `lib/config-load.ts`).
+- The redo adapts the reference implementation from the branch `feature/kb-agents-thinking-config` (kept as reference, not merged).
+- Board: the work redoes KB-2..KB-5 (moved back to `todo`) on top of the current develop; KB-6..KB-10 (forwarding, docs) follow in the same epic KB-1.
+
+### Out of scope
+
+- Backward compatibility with the old `models` format.
+- Any change to the subagent system prompts (`agents/*.md`).
+- Any change to the config file location (FR-15 stays).
+
 ## v0.1.3 — 2026-11-13
 
 Changes vs v0.1.2: the global `kb-workflow.json` moves home. The loader reads it from the **extension's own folder** (where the extension code lives and the file is shipped) instead of the agents folder (`getAgentDir()`). The agents-folder lookup is removed entirely.
