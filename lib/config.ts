@@ -49,13 +49,8 @@ export interface RoleConfig {
 export type KbAgentsConfig = Partial<Record<AgentRole, RoleConfig>>;
 
 export interface KbWorkflowConfig {
-	/**
-	 * The v0.2.0 `kb-agents` shape. The deprecated `models` shape below is
-	 * still honored by `resolveAgentModel` until the loader migrates (KB-5).
-	 */
+	/** The v0.2.0 `kb-agents` shape (the old `models` format is unsupported, FR-17). */
 	kbAgents?: KbAgentsConfig;
-	/** @deprecated old format, kept only so the current loader keeps working. */
-	models?: Partial<Record<AgentRole, string>>;
 }
 
 /** Validate a raw thinking-level value; unknown values are treated as unset (FR-19). */
@@ -141,7 +136,4 @@ export function resolveAgentConfig(
 	};
 }
 
-/** Resolve the model for a role; falls back to the caller's active model when unset. */
-export function resolveAgentModel(role: AgentRole, config: KbWorkflowConfig, fallback?: string): string | undefined {
-	return config.kbAgents?.[role]?.model ?? config.models?.[role] ?? fallback;
-}
+

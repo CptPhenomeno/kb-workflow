@@ -5,7 +5,7 @@ import {
 	parseKbAgents,
 	parseThinkingLevel,
 	resolveAgentConfig,
-	resolveAgentModel,
+
 	type SessionFallbacks,
 	type AgentRole,
 	type KbWorkflowConfig,
@@ -127,13 +127,9 @@ test("new-format config resolves model and thinking-level per role", () => {
 			},
 		}),
 	};
-	assert.equal(resolveAgentModel("developer", config, "session/m"), "d/m");
-	assert.equal(resolveAgentModel("qa", config, "session/m"), "q/m");
-	assert.equal(resolveAgentModel("planner", config, "session/m"), "session/m");
-
-	// While the old models shape is still loaded by config-load.ts (until
-	// KB-5), resolveAgentModel keeps honoring it so the runtime keeps working.
-	assert.equal(resolveAgentModel("reviewer", { models: { reviewer: "old/m" } }, "s/m"), "old/m");
+	assert.equal(resolveAgentConfig("developer", config, { model: "session/m" }).model, "d/m");
+	assert.equal(resolveAgentConfig("qa", config, { model: "session/m" }).model, "q/m");
+	assert.equal(resolveAgentConfig("planner", config, { model: "session/m" }).model, "session/m");
 });
 
 test("role takes model from global and thinking-level from project when each defines only one", () => {
