@@ -189,3 +189,51 @@ test("message mode neither spawns developers nor runs git actions itself", async
 	// The kickoff is the fixed template plus the user message — nothing else.
 	assert.equal(result.kickoff, devKickoff("work on KB-42"));
 });
+
+test("kickoff template instructs the main agent to spawn kb-qa for stories/epics reaching review", () => {
+	const kickoff = devKickoff("finish the auth story");
+	// FR-14: whenever a story or epic reaches review during the
+	// message-driven work, a kb-qa round is spawned before finishing.
+	assert.match(kickoff, /kb-qa/);
+	assert.match(kickoff, /story or an epic|story or epic/i);
+	assert.match(kickoff, /reaches? the .review. column/i);
+	assert.match(kickoff, /before finishing/i);
+	// The kb-qa procedure: spawn via kb_agent, verify merges, delete with -d, never merge.
+	assert.match(kickoff, /agent .kb-qa./);
+	assert.match(kickoff, /git branch -d/);
+	assert.match(kickoff, /never merges/i);
+});
+
+test("message mode sweep routes stories/epics to kb-qa and tasks to kb-reviewer", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const story = item("KB-8", "review");
+	story.type = "story";
+	const epic = item("KB-1", "review");
+	epic.type = "epic";
+	const task = item("KB-9", "review");
+	const pending = [story, epic, task];
+	const events: string[] = [];
+	await runMessageDev({
+		cwd: dir,
+		message: "work on the login story",
+		kb: fakeKb(new Map([["list", () => kbRun(pending)]]), []),
+		preFlight: async () => ({ ok: true, branch: "develop" as const }),
+		spawnReviewer: async (i) => {
+			events.push(`reviewer ${i.id}`);
+			return { ok: true, output: "done", stderr: "" };
+		},
+		spawnQa: async (i) => {
+			events.push(`qa ${i.id}`);
+			return { ok: true, output: "qa done", stderr: "" };
+		},
+		sendUserMessage: async () => {
+			events.push("kickoff");
+		},
+	});
+
+	// Same routing as the bare mode (shared sweep, FR-12): the task goes to
+	// kb-reviewer, the story and the epic go to kb-qa — before the kickoff.
+	assert.deepEqual(events, ["qa KB-1", "qa KB-8", "reviewer KB-9", "kickoff"]);
+});

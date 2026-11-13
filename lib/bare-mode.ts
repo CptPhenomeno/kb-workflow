@@ -3,7 +3,8 @@
  *
  * After the FR-1 pre-flight the handler:
  *   1. completes the review of any items already sitting in the `review`
- *      column (board-wide, one kb-reviewer round per item);
+ *      column, routed by type (FR-12): tasks/subtasks to kb-reviewer,
+ *      stories/epics to kb-qa;
  *   2. resolves the next element with `kb next` at board level (no --parent
  *      filter) — first available task or bug per the kb DAG;
  *   3. works exactly that one element through its full cycle (FR-2 branch
@@ -35,8 +36,10 @@ export interface BareModeDeps {
 	kb: (args: string[]) => Promise<KbRun>;
 	/** Spawn the kb-developer subagent for a task. */
 	spawnDev: (task: KbItem) => Promise<AgentRoundResult>;
-	/** Spawn the kb-reviewer subagent for an item in the review column. */
+	/** Spawn the kb-reviewer subagent for a task/subtask in the review column. */
 	spawnReviewer: (item: KbItem) => Promise<AgentRoundResult>;
+	/** Spawn the kb-qa subagent for a story/epic in the review column (FR-13). */
+	spawnQa: (item: KbItem) => Promise<AgentRoundResult>;
 	/** Optional UI notifications (message + level). */
 	notify?: (message: string, level: "info" | "error") => void;
 	/** Optional UI status line updates. */
@@ -61,14 +64,19 @@ const reportRound = (report: string[], kind: string, item: KbItem, r: AgentRound
 	if (!r.ok) report.push(`  error: ${r.errorMessage ?? ""} ${r.stderr.trim().slice(0, 300)}`);
 };
 
+/** True when the item is reviewed by kb-reviewer (task-level, FR-4 merge chain). */
+function isTaskLevel(item: KbItem): boolean {
+	return item.type === "task" || item.type === "subtask" || item.type === "bug";
+}
+
 /**
- * Complete the review of any items already sitting in the `review` column:
- * board-wide, one kb-reviewer round per item, in deterministic order
- * (position, then id). Shared by both retrieval modes (FR-9 step 1 and
- * FR-10 step 2, NFR-6). Returns the swept items.
+ * Complete the review of any items already sitting in the `review` column,
+ * routed by type (FR-12): tasks and subtasks (and bugs) get a kb-reviewer
+ * round (FR-4 merge chain), stories and epics get a kb-qa round (FR-13).
+ * Shared by both retrieval modes (NFR-6). Returns the swept items.
  */
 export async function sweepPendingReviews(
-	deps: Pick<BareModeDeps, "kb" | "spawnReviewer" | "setStatus">,
+	deps: Pick<BareModeDeps, "kb" | "spawnReviewer" | "spawnQa" | "setStatus">,
 	report: string[],
 ): Promise<KbItem[]> {
 	const reviewRes = await deps.kb(["list", "--status", "review"]);
@@ -80,11 +88,51 @@ export async function sweepPendingReviews(
 		.filter((i) => i.status === "review")
 		.sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
 	for (const item of reviewItems) {
-		deps.setStatus?.(`review ${item.id}`);
-		const rev = await deps.spawnReviewer(item);
-		reportRound(report, "review", item, rev);
+		if (isTaskLevel(item)) {
+			deps.setStatus?.(`review ${item.id}`);
+			const rev = await deps.spawnReviewer(item);
+			reportRound(report, "review", item, rev);
+		} else {
+			deps.setStatus?.(`qa ${item.id}`);
+			const qa = await deps.spawnQa(item);
+			reportRound(report, "qa review", item, qa);
+		}
 	}
 	return reviewItems;
+}
+
+/**
+ * Spawn the kb-qa rounds implied by the board state after a task round
+ * (FR-13, bare mode): walk up the ancestry from the worked item — if the
+ * parent story sits in `review` (all its tasks done), run a kb-qa round on
+ * it; if the parent epic in turn sits in `review` (all sibling stories
+ * done), run a kb-qa round on it too. kb-qa never merges (NFR-10). The
+ * trigger is derived purely from the board state, so it fits the current
+ * one-element loop and the story loop of FR-11 alike.
+ */
+export async function qaRoundsOnCompletion(
+	deps: Pick<BareModeDeps, "kb" | "spawnQa" | "setStatus">,
+	report: string[],
+	itemId: string,
+): Promise<KbItem[]> {
+	const reviewed: KbItem[] = [];
+	let currentId = itemId;
+	// At most story + epic above a task; guard against cycles anyway.
+	for (let depth = 0; depth < 2; depth++) {
+		const show = await deps.kb(["show", currentId]);
+		const current = (show.code === 0 ? show.json : undefined) as KbItem | undefined;
+		if (!current?.parent) break;
+		const parentShow = await deps.kb(["show", current.parent]);
+		const parent = (parentShow.code === 0 ? parentShow.json : undefined) as KbItem | undefined;
+		// Only stories and epics get kb-qa rounds (FR-12/FR-13).
+		if (!parent || parent.status !== "review" || isTaskLevel(parent)) break;
+		deps.setStatus?.(`qa ${parent.id}`);
+		const qa = await deps.spawnQa(parent);
+		reportRound(report, "qa review", parent, qa);
+		reviewed.push(parent);
+		currentId = parent.id;
+	}
+	return reviewed;
 }
 
 export async function runBareDev(deps: BareModeDeps): Promise<BareModeResult> {
@@ -135,6 +183,10 @@ export async function runBareDev(deps: BareModeDeps): Promise<BareModeResult> {
 	deps.setStatus?.(`review ${element.id}`);
 	const rev = await deps.spawnReviewer(element);
 	reportRound(report, "review", element, rev);
+
+	// FR-13: if the parent story (and in turn the epic) reached `review` with
+	// this task done, spawn the kb-qa rounds derived from the board state.
+	await qaRoundsOnCompletion(deps, report, element.id);
 
 	// Final board state of the element.
 	const show = await deps.kb(["show", element.id]);

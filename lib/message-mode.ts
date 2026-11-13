@@ -25,8 +25,10 @@ export interface MessageModeDeps {
 	kb: (args: string[]) => Promise<KbRun>;
 	/** Stands in for `preFlightCheck(cwd)` (FR-1). */
 	preFlight: () => Promise<{ ok: boolean; error?: string; branch?: string }>;
-	/** Spawn the kb-reviewer subagent for an item in the review column. */
+	/** Spawn the kb-reviewer subagent for a task/subtask in the review column. */
 	spawnReviewer: (item: KbItem) => Promise<AgentRoundResult>;
+	/** Spawn the kb-qa subagent for a story/epic in the review column (FR-13). */
+	spawnQa: (item: KbItem) => Promise<AgentRoundResult>;
 	/** Stands in for `pi.sendUserMessage(text)`. */
 	sendUserMessage: (text: string) => void | Promise<void>;
 	/** Optional UI notifications (message + level). */
@@ -76,7 +78,10 @@ Work the identified items in DAG order (respect the board's blockers: run \`kb s
 - when the developer round succeeds, call the \`kb_agent\` tool with agent "kb-reviewer" to review and merge the item (merge chain into develop);
 - proceed to the next item only after the previous one is done.
 
-STEP 5 — FINAL REPORT
+STEP 5 — KB-QA ROUNDS FOR STORIES AND EPICS
+Whenever a story or an epic reaches the \`review\` column during this message-driven work — a story because all its tasks are done, an epic because all its stories are done — spawn a kb-qa round on it with the \`kb_agent\` tool (agent \"kb-qa\") BEFORE finishing. The kb-qa procedure: validate the item's acceptance criteria against the merged work on develop; if OK, verify that every task branch (feature/<ID>, fix/<ID>) is merged into develop and delete the merged branches with \`git branch -d\`, check the criteria, add a note and move the item to done; if there are problems, add a note and move the item back to todo. kb-qa never merges branches — task-level integration stays with kb-reviewer.
+
+STEP 6 — FINAL REPORT
 Finish with a report of every item worked: board status, tests run and their result, and anything the user should look at.`;
 }
 

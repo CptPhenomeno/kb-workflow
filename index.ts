@@ -105,6 +105,21 @@ function reviewTask(item: KbItem): string {
 	].join("\n");
 }
 
+function qaTask(item: KbItem): string {
+	return [
+		`QA-review kanban item ${item.id} ("${item.title}"), currently in the "review" column, in the project rooted at the cwd.`,
+		``,
+		`Follow your system prompt (kb-qa) and the appended kb guide exactly:`,
+		`- act as agent-qa-${item.id}`,
+		`- run \`kb show ${item.id} --json\` and validate every acceptance criterion against the merged work on develop`,
+		`- if OK: verify that every task branch of this ${item.type} (feature/<ID>, fix/<ID>) is merged into develop (tip is an ancestor of develop), delete the merged branches with \`git branch -d\`, check all acceptance criteria, add a note and move the item to done`,
+		`- if problems: add a note listing them and move the item back to todo`,
+		`- NEVER merge any branch yourself and never delete a branch with anything but \`git branch -d\``,
+		``,
+		`Finish with the verdict (OK / problems), the branches verified and deleted, and the final board status of ${item.id}.`,
+	].join("\n");
+}
+
 export default function kbWorkflow(pi: ExtensionAPI) {
 	// ---------------------------------------------------------------------------
 	// Tool: ask_user — ask the user a question through the TUI dialogs.
@@ -263,7 +278,7 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 	// ---------------------------------------------------------------------------
 	pi.registerCommand("kb-dev", {
 		description:
-			"Work the next available kb element (kb next, board level): a kb-developer subagent implements it (kb resolves the DAG via blockers), then a kb-reviewer subagent reviews and merges it; items left in review are completed first. With a message argument, the message is delivered to the main agent as a kickoff that identifies and works the pertinent items in DAG order",
+			"Work the next available kb element (kb next, board level): a kb-developer subagent implements it (kb resolves the DAG via blockers), then a kb-reviewer subagent reviews and merges it; items left in review are completed first, routed by type (tasks/subtasks to kb-reviewer, stories/epics to kb-qa, which also runs when the worked item's story or epic completes). With a message argument, the message is delivered to the main agent as a kickoff that identifies and works the pertinent items in DAG order and spawns kb-qa rounds for stories/epics reaching review",
 		handler: async (args, ctx) => {
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("The agent is busy; try again when idle.", "warning");
@@ -295,6 +310,7 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 			const fallbackModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const devModel = resolveAgentModel("developer", config, fallbackModel);
 			const revModel = resolveAgentModel("reviewer", config, fallbackModel);
+			const qaModel = resolveAgentModel("qa", config, fallbackModel);
 
 			// Resolve the parent story of a task for its dev prompt (best effort).
 			const storyCache = new Map<string, KbItem | null>();
@@ -309,6 +325,11 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 
 		const spawnReviewer = (item: KbItem) =>
 			runSubagent({ agent: "kb-reviewer", cwd, model: revModel, task: reviewTask(item) });
+
+		// kb-qa rounds: stories and epics in review (FR-12/FR-13). kb-qa never
+		// merges — it verifies ancestry and deletes the merged task branches.
+		const spawnQa = (item: KbItem) =>
+			runSubagent({ agent: "kb-qa", cwd, model: qaModel, task: qaTask(item) });
 
 		ctx.ui.setStatus("kb-dev", "running");
 		let report: string;
@@ -327,6 +348,7 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 						spawnDev: async (task) =>
 							runSubagent({ agent: "kb-developer", cwd, model: devModel, task: devTask(task, await storyOf(task)) }),
 						spawnReviewer,
+						spawnQa,
 						notify: (msg, level) => ctx.ui.notify(msg, level),
 						setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
 					}),
@@ -337,6 +359,7 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 						kb: (a) => runKb(a, cwd),
 						preFlight: () => preFlightCheck(cwd),
 						spawnReviewer,
+						spawnQa,
 						sendUserMessage: (text) => pi.sendUserMessage(text),
 						notify: (msg, level) => ctx.ui.notify(msg, level),
 						setStatus: (status) => ctx.ui.setStatus("kb-dev", status),

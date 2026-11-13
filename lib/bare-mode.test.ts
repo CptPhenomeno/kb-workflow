@@ -221,6 +221,179 @@ test("bare invocation with nothing available notifies the user without side effe
 	assert.ok(/nothing available/i.test(result.report));
 });
 
+test("sweep routes review items by type: tasks/subtasks to kb-reviewer, stories/epics to kb-qa", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const pending = [
+		item("KB-9", "task", "review"),
+		item("KB-10", "subtask", "review"),
+		item("KB-8", "story", "review"),
+		item("KB-1", "epic", "review"),
+	];
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun(pending)],
+			["next", () => kbRun({ error: "not found", message: "nothing available" }, 2)],
+		]),
+	};
+
+	const events: string[] = [];
+	await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnReviewer: async (i) => {
+			events.push(`reviewer ${i.id}`);
+			return okAgent(`reviewed ${i.id}`);
+		},
+		spawnQa: async (i) => {
+			events.push(`qa ${i.id}`);
+			return okAgent(`qa ${i.id}`);
+		},
+		spawnDev: async () => {
+			throw new Error("no dev round expected");
+		},
+	});
+
+	// deterministic order (position, then id): reviewer for task/subtask, qa for story/epic
+	assert.deepEqual(events, ["qa KB-1", "reviewer KB-10", "qa KB-8", "reviewer KB-9"]);
+});
+
+test("bare-mode story completion triggers the kb-qa story review", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	// all tasks of story KB-8 are done: the story sits in review
+	const taskItem = item("KB-13", "task", "done", "KB-8");
+	const story = item("KB-8", "story", "review", "KB-1");
+	const epic = item("KB-1", "epic", "doing", null);
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", () => kbRun(taskItem)],
+			["show", (args) => {
+				const id = args[1];
+				if (id === "KB-13") return kbRun(taskItem);
+				if (id === "KB-8") return kbRun(story);
+				if (id === "KB-1") return kbRun(epic);
+				return kbRun({ error: "not found" }, 2);
+			}],
+		]),
+	};
+
+	const events: string[] = [];
+	const result = await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnReviewer: async (i) => {
+			events.push(`reviewer ${i.id}`);
+			return okAgent(`reviewed ${i.id}; merged feature/${i.id} into develop`);
+		},
+		spawnQa: async (i) => {
+			events.push(`qa ${i.id}`);
+			return okAgent(`qa ${i.id} OK — verified merged branches; deleted feature/KB-13`);
+		},
+		spawnDev: async (i) => {
+			events.push(`dev ${i.id}`);
+			return okAgent(`implemented ${i.id}`);
+		},
+	});
+
+	// the story kb-qa round runs after the task's review round; the epic is
+	// not in review (a sibling story is still open), so no epic round
+	assert.deepEqual(events, ["dev KB-13", "reviewer KB-13", "qa KB-8"]);
+	// the final report lists the qa round with its verdict and deletions
+	assert.ok(result.report.includes("qa review KB-8"));
+	assert.ok(result.report.includes("deleted feature/KB-13"));
+});
+
+test("all-stories-done triggers the epic kb-qa review", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const taskItem = item("KB-13", "task", "done", "KB-8");
+	const story = item("KB-8", "story", "review", "KB-1");
+	const epic = item("KB-1", "epic", "review", null);
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", () => kbRun(taskItem)],
+			["show", (args) => {
+				const id = args[1];
+				if (id === "KB-13") return kbRun(taskItem);
+				if (id === "KB-8") return kbRun(story);
+				if (id === "KB-1") return kbRun(epic);
+				return kbRun({ error: "not found" }, 2);
+			}],
+		]),
+	};
+
+	const events: string[] = [];
+	const result = await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnReviewer: async (i) => {
+			events.push(`reviewer ${i.id}`);
+			return okAgent(`reviewed ${i.id}; merged feature/${i.id} into develop`);
+		},
+		spawnQa: async (i) => {
+			events.push(`qa ${i.id}`);
+			return okAgent(`qa ${i.id} OK — verified merged branches; deleted feature/KB-13`);
+		},
+		spawnDev: async (i) => {
+			events.push(`dev ${i.id}`);
+			return okAgent(`implemented ${i.id}`);
+		},
+	});
+
+	// story round first, then the epic round (all sibling stories done)
+	assert.deepEqual(events, ["dev KB-13", "reviewer KB-13", "qa KB-8", "qa KB-1"]);
+	assert.ok(result.report.includes("qa review KB-8"));
+	assert.ok(result.report.includes("qa review KB-1"));
+	// the final report lists branches, merge outcomes, review verdicts and deletions
+	assert.ok(result.report.includes("merged feature/KB-13 into develop"));
+	assert.ok(result.report.includes("deleted feature/KB-13"));
+});
+
+test("no kb-qa round when the parent story is not in review", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const taskItem = item("KB-13", "task", "done", "KB-8");
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", () => kbRun(taskItem)],
+			["show", (args) => (args[1] === "KB-13" ? kbRun(taskItem) : kbRun(story))],
+		]),
+	};
+
+	const events: string[] = [];
+	await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnReviewer: async (i) => {
+			events.push(`reviewer ${i.id}`);
+			return okAgent(`reviewed ${i.id}`);
+		},
+		spawnQa: async (i) => {
+			events.push(`qa ${i.id}`);
+			return okAgent(`qa ${i.id}`);
+		},
+		spawnDev: async (i) => {
+			events.push(`dev ${i.id}`);
+			return okAgent(`implemented ${i.id}`);
+		},
+	});
+
+	assert.deepEqual(events, ["dev KB-13", "reviewer KB-13"]);
+});
+
 test("bare invocation retries a failed developer round once, then reviews on success", async (t) => {
 	const dir = tmpRepo();
 	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
