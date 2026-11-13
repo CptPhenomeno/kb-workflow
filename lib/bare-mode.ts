@@ -237,10 +237,12 @@ async function runTaskCycle(
 	}
 
 	// FR-4 review round for the task (merge chain inside the reviewer).
+	// A failed review means the task's cycle did not complete (it is not
+	// merged/done), so the caller must not move on to the next task.
 	deps.setStatus?.(`review ${task.id}`);
 	const rev = await deps.spawnReviewer(task);
 	reportRound(report, "review", task, rev);
-	return true;
+	return rev.ok;
 }
 
 /**

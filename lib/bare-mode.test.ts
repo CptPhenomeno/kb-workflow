@@ -799,6 +799,201 @@ test("invocation stops after the story and any epic review", async (t) => {
 	assert.equal(events[events.length - 1], "qa KB-1");
 });
 
+// --- KB-36: remaining AC-21 coverage (sweep × story loop, report, edge cases) ---
+
+test("FR-12 sweep completes pending reviews before the story loop; report covers the full story run", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	// a task and a story already sit in review: the sweep completes them
+	// (routed by type) before the FR-11 chain resolves the story to work
+	const pendingTask = item("KB-9", "task", "review", "KB-7");
+	const pendingStory = item("KB-7", "story", "review", "KB-1");
+	const epic = item("KB-1", "epic", "doing", null);
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const t1 = item("KB-13", "task", "todo", "KB-8");
+	const t2 = item("KB-14", "task", "todo", "KB-8");
+	const queue = [t1, t2];
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([pendingStory, pendingTask])],
+			[
+				"next",
+				(args) => {
+					if (args.includes("--parent") && !args.includes("--type")) {
+						const next = queue.shift();
+						return next ? kbRun(next) : notFound();
+					}
+					return chainNext({ epic, scopedStory: story })(args);
+				},
+			],
+			[
+				"show",
+				(args) => {
+					const id = args[1];
+					if (id === story.id) return kbRun({ ...story, status: queue.length ? "doing" : "review" });
+					if (id === epic.id) return kbRun(epic);
+					const task = [t1, t2].find((x) => x.id === id);
+					return task ? kbRun({ ...task, status: "done" }) : kbRun({ error: "not found" }, 2);
+				},
+			],
+		]),
+	};
+
+	const events: string[] = [];
+	const result = await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnReviewer: async (i) => {
+			events.push(`reviewer ${i.id}`);
+			return okAgent(`reviewed ${i.id}; merged feature/${i.id} into develop`);
+		},
+		spawnQa: async (i) => {
+			events.push(`qa ${i.id}`);
+			return okAgent(`qa ${i.id} OK — verified merged branches; deleted feature/KB-9`);
+		},
+		spawnDev: async (i) => {
+			events.push(`dev ${i.id}`);
+			return okAgent(`implemented ${i.id}`);
+		},
+	});
+
+	// the sweep completes both pending reviews first — the pending story
+	// routed to kb-qa, the pending task to kb-reviewer — then the story
+	// loop works the resolved story's tasks in DAG order, and the qa round
+	// for the freshly finished story fires at the end
+	assert.deepEqual(events, [
+		"qa KB-7",
+		"reviewer KB-9",
+		"dev KB-13",
+		"reviewer KB-13",
+		"dev KB-14",
+		"reviewer KB-14",
+		"qa KB-8",
+	]);
+	// one story per invocation: only the sweep + the FR-11 chain + the
+	// story's own --parent queries ran
+	const boardNext = script.calls.filter((c) => c[0] === "next" && c[1] !== "--parent");
+	assert.deepEqual(boardNext, [
+		["next", "--type", "epic"],
+		["next", "--type", "story", "--parent", "KB-1"],
+	]);
+	// the report covers the whole run: the swept items, the resolved unit
+	// with its provenance, every task cycle, and the final story state
+	assert.ok(result.report.includes("qa review KB-7"));
+	assert.ok(result.report.includes("review KB-9"));
+	assert.ok(result.report.includes('resolved unit: story KB-8 "item KB-8" (epic KB-1-scoped story); one story per invocation.'));
+	assert.ok(result.report.includes("branch feature/KB-13"));
+	assert.ok(result.report.includes("merged feature/KB-13 into develop"));
+	assert.ok(result.report.includes("merged feature/KB-14 into develop"));
+	assert.ok(result.report.includes("story KB-8: 2 task(s) worked."));
+	assert.ok(result.report.includes('Story KB-8 is now in column "review".'));
+});
+
+test("reviewer failure mid-story stops the story loop before the next task", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const epic = item("KB-1", "epic", "doing", null);
+	const t1 = item("KB-13", "task", "todo", "KB-8");
+	const t2 = item("KB-14", "task", "todo", "KB-8");
+	const queue = [t1, t2];
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			[
+				"next",
+				(args) => {
+					if (args.includes("--parent")) {
+						const next = queue.shift();
+						return next ? kbRun(next) : notFound();
+					}
+					return chainNext({ story })(args);
+				},
+			],
+			[
+				"show",
+				(args) => {
+					const id = args[1];
+					if (id === story.id) return kbRun(story);
+					if (id === epic.id) return kbRun(epic);
+					const task = [t1, t2].find((x) => x.id === id);
+					return task ? kbRun(task) : kbRun({ error: "not found" }, 2);
+				},
+			],
+		]),
+	};
+
+	const events: string[] = [];
+	const result = await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnReviewer: async (i) => {
+			events.push(`reviewer ${i.id}`);
+			return i.id === "KB-13"
+				? { ok: false, output: "", stderr: "merge conflict", errorMessage: "exit 1" }
+				: okAgent(`reviewed ${i.id}`);
+		},
+		spawnQa: async (i) => {
+			events.push(`qa ${i.id}`);
+			return okAgent(`qa ${i.id}`);
+		},
+		spawnDev: async (i) => {
+			events.push(`dev ${i.id}`);
+			return okAgent(`implemented ${i.id}`);
+		},
+	});
+
+	// the first task's review failed: its cycle did not complete, so the
+	// loop stops — the second task is never worked and no qa round fires
+	assert.deepEqual(events, ["dev KB-13", "reviewer KB-13"]);
+	// the loop broke right after the failed cycle: only the initial
+	// --parent query ran
+	assert.equal(script.calls.filter((c) => c.join(" ") === "next --parent KB-8").length, 1);
+	// the report shows the failed review
+	assert.ok(result.report.includes("review KB-13"));
+	assert.ok(result.report.includes("FAILED"));
+	assert.ok(result.report.includes("story KB-8: 0 task(s) worked."));
+	// the story never reached review: no qa round in the report
+	assert.ok(!result.report.includes("qa review"));
+});
+
+test("empty story reports zero tasks worked and its final column", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", chainNext({ story })],
+			["show", () => kbRun({ ...story, status: "todo" })],
+		]),
+	};
+
+	const events: string[] = [];
+	const result = await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnReviewer: async (i) => okAgent(`reviewed ${i.id}`),
+		spawnQa: async (i) => okAgent(`qa ${i.id}`),
+		spawnDev: async (i) => {
+			events.push(`dev ${i.id}`);
+			return okAgent(`implemented ${i.id}`);
+		},
+	});
+
+	// no task is available under the story: nothing is worked
+	assert.deepEqual(events, []);
+	assert.ok(script.calls.some((c) => c.join(" ") === "next --parent KB-8"));
+	assert.ok(result.report.includes("story KB-8: 0 task(s) worked."));
+	assert.ok(result.report.includes('Story KB-8 is now in column "todo".'));
+});
+
 test("bare invocation with no story available notifies the user without side effects", async (t) => {
 	const dir = tmpRepo();
 	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
