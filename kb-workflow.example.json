@@ -2,6 +2,7 @@
 	"models": {
 		"planner": "anthropic/claude-sonnet-4-5",
 		"developer": "anthropic/claude-haiku-4-5",
-		"reviewer": "anthropic/claude-sonnet-4-5"
+		"reviewer": "anthropic/claude-sonnet-4-5",
+		"qa": "anthropic/claude-sonnet-4-5"
 	}
 }

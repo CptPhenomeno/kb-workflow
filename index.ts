@@ -15,11 +15,11 @@
  *
  * Tools (callable by the LLM):
  *   ask_user         Ask the user a question (input / select / multi-select).
- *   kb_agent         Run a kb-planner / kb-developer / kb-reviewer subagent in an
- *                    isolated pi process.
+ *   kb_agent         Run a kb-planner / kb-developer / kb-reviewer / kb-qa subagent
+ *                    in an isolated pi process.
  *
  * Model config: <agentDir>/kb-workflow.json merged with <project>/.pi/kb-workflow.json
- *   { "models": { "planner": "provider/model", "developer": "...", "reviewer": "..." } }
+ *   { "models": { "planner": "provider/model", "developer": "...", "reviewer": "...", "qa": "..." } }
  * Missing roles inherit the active model of the dispatching session.
  */
 
@@ -29,7 +29,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { loadKbWorkflowConfig, resolveAgentModel, type AgentRole } from "./lib/config.ts";
+import { resolveAgentModel, type AgentRole } from "./lib/config.ts";
+import { loadKbWorkflowConfig } from "./lib/config-load.ts";
 import { kbErrorMessage, runKb, type KbItem } from "./lib/kb.ts";
 import { preFlightCheck } from "./lib/git.ts";
 import { runBareDev } from "./lib/bare-mode.ts";
@@ -37,7 +38,7 @@ import { runMessageDev } from "./lib/message-mode.ts";
 import { dispatchDev } from "./lib/dispatch.ts";
 import { actorForAgent, runSubagent, type KbAgentName } from "./lib/subagent.ts";
 
-const AgentParam = StringEnum(["kb-planner", "kb-developer", "kb-reviewer"] as const, {
+const AgentParam = StringEnum(["kb-planner", "kb-developer", "kb-reviewer", "kb-qa"] as const, {
 	description: "Which kb subagent to run",
 });
 
@@ -194,9 +195,10 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 		label: "KB Agent",
 		description:
 			"Run a specialized kb subagent in an isolated pi process. The subagent gets its own system prompt plus " +
-			"`kb guide`, runs in the project cwd and reports on the kb board as agent-plan / agent-dev / agent-review. " +
+			"`kb guide`, runs in the project cwd and reports on the kb board as agent-plan / agent-dev / agent-review / agent-qa. " +
 			"Use kb-planner after SPEC.md is written; kb-developer to implement one kanban item; kb-reviewer to review " +
-			"an item sitting in the review column.",
+			"an item sitting in the review column; kb-qa to review a story or epic in the review column, verify the " +
+			"merged work on develop, delete merged task branches and move it to done/todo.",
 		parameters: Type.Object({
 			agent: AgentParam,
 			task: Type.String({

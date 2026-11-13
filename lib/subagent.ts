@@ -14,9 +14,9 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runKb } from "./kb.ts";
 
-export type KbAgentName = "kb-planner" | "kb-developer" | "kb-reviewer";
+export type KbAgentName = "kb-planner" | "kb-developer" | "kb-reviewer" | "kb-qa";
 
-export const KB_AGENT_NAMES: readonly KbAgentName[] = ["kb-planner", "kb-developer", "kb-reviewer"];
+export const KB_AGENT_NAMES: readonly KbAgentName[] = ["kb-planner", "kb-developer", "kb-reviewer", "kb-qa"];
 
 const LIB_DIR = path.dirname(fileURLToPath(import.meta.url));
 const AGENTS_DIR = path.resolve(LIB_DIR, "..", "agents");
@@ -30,6 +30,8 @@ export function actorForAgent(agent: KbAgentName): string {
 			return "agent-dev";
 		case "kb-reviewer":
 			return "agent-review";
+		case "kb-qa":
+			return "agent-qa";
 	}
 }
 

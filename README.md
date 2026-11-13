@@ -15,7 +15,7 @@ A [pi](https://github.com/badlogic/pi-mono) extension that drives the
 | Tool | What it does |
 | ---- | ------------ |
 | `ask_user(question, options?, multiple?)` | Asks the user through the TUI: free-text input, single-choice select (with a "type a custom answer" escape hatch) or a multi-select checkbox list. |
-| `kb_agent(agent, task)` | Runs `kb-planner` / `kb-developer` / `kb-reviewer` in an isolated `pi --mode json -p --no-session` process with its own system prompt (`agents/<name>.md`) plus the output of `kb guide`. The subagent identifies on the board as `agent-plan` / `agent-dev` / `agent-review`. |
+| `kb_agent(agent, task)` | Runs `kb-planner` / `kb-developer` / `kb-reviewer` / `kb-qa` in an isolated `pi --mode json -p --no-session` process with its own system prompt (`agents/<name>.md`) plus the output of `kb guide`. The subagent identifies on the board as `agent-plan` / `agent-dev` / `agent-review` / `agent-qa`. |
 
 ## Subagents
 
@@ -24,6 +24,7 @@ A [pi](https://github.com/badlogic/pi-mono) extension that drives the
 | `agents/kb-planner.md` | SPEC.md → `plan.yaml` → `kb import` | `agent-plan` |
 | `agents/kb-developer.md` | Implements one item with the TDD loop from `kb guide` | `agent-dev-<ID>` |
 | `agents/kb-reviewer.md` | Re-runs tests, reviews the diff, `done` or back to `todo` | `agent-review-<ID>` |
+| `agents/kb-qa.md` | Reviews a story/epic in `review` against `develop`, deletes merged task branches (`git branch -d`), `done` or back to `todo` with a note | `agent-qa-<ID>` |
 
 ## Model configuration
 
@@ -37,7 +38,8 @@ Models for the subagents are resolved from (later wins):
 	"models": {
 		"planner": "anthropic/claude-sonnet-4-5",
 		"developer": "anthropic/claude-haiku-4-5",
-		"reviewer": "anthropic/claude-sonnet-4-5"
+		"reviewer": "anthropic/claude-sonnet-4-5",
+		"qa": "anthropic/claude-sonnet-4-5"
 	}
 }
 ```

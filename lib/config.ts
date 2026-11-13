@@ -6,34 +6,18 @@
  *   2. <project>/.pi/kb-workflow.json     (project-local override, CONFIG_DIR_NAME aware)
  *
  * Shape:
- *   { "models": { "planner": "provider/model", "developer": "...", "reviewer": "..." } }
+ *   { "models": { "planner": "provider/model", "developer": "...", "reviewer": "...", "qa": "..." } }
  *
  * A missing role falls back to the model active in the dispatching pi session.
+ *
+ * This module is pure (no filesystem / pi-package imports) so it stays
+ * unit-testable; the loader lives in `./config-load.ts`.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-
-export type AgentRole = "planner" | "developer" | "reviewer";
+export type AgentRole = "planner" | "developer" | "reviewer" | "qa";
 
 export interface KbWorkflowConfig {
 	models?: Partial<Record<AgentRole, string>>;
-}
-
-function readJson(file: string): KbWorkflowConfig | undefined {
-	try {
-		if (!fs.existsSync(file)) return undefined;
-		return JSON.parse(fs.readFileSync(file, "utf8")) as KbWorkflowConfig;
-	} catch {
-		return undefined; // malformed config files are ignored, never fatal
-	}
-}
-
-export function loadKbWorkflowConfig(cwd: string): KbWorkflowConfig {
-	const global = readJson(path.join(getAgentDir(), "kb-workflow.json"));
-	const project = readJson(path.join(cwd, CONFIG_DIR_NAME, "kb-workflow.json"));
-	return { models: { ...global?.models, ...project?.models } };
 }
 
 /** Resolve the model for a role; falls back to the caller's active model when unset. */
