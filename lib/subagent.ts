@@ -63,7 +63,7 @@ export interface RunSubagentOptions {
 	cwd: string;
 	/** `provider/model` string; when omitted the subagent inherits the dispatching session's model. */
 	model?: string;
-	/** Thinking level of the dispatching session; only forwarded when inheriting the model. */
+	/** Resolved thinking level; forwarded independently of `model` (FR-21). */
 	thinkingLevel?: string;
 	signal?: AbortSignal;
 	/** Called with the latest assistant text on every streamed message. */
@@ -107,6 +107,18 @@ function lastAssistantText(messages: Array<{ role: string; content: unknown }>):
 	return "";
 }
 
+/**
+ * Build the `pi` CLI flags for the resolved model and thinking level.
+ * The two properties are independent (FR-21): neither suppresses the
+ * other; a property that resolves to nothing is simply not passed.
+ */
+export function buildPiArgs(resolved: { model?: string; thinkingLevel?: string }): string[] {
+	const args: string[] = [];
+	if (resolved.model) args.push("--model", resolved.model);
+	if (resolved.thinkingLevel) args.push("--thinking", resolved.thinkingLevel);
+	return args;
+}
+
 export async function runSubagent(opts: RunSubagentOptions): Promise<SubagentResult> {
 	const actor = actorForAgent(opts.agent);
 	const usage: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
@@ -130,8 +142,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SubagentRes
 	await fs.promises.writeFile(tmpFile, systemPrompt, { encoding: "utf8", mode: 0o600 });
 
 	const args = ["--mode", "json", "-p", "--no-session"];
-	if (opts.model) args.push("--model", opts.model);
-	else if (opts.thinkingLevel) args.push("--thinking", opts.thinkingLevel);
+	args.push(...buildPiArgs({ model: opts.model, thinkingLevel: opts.thinkingLevel }));
 	args.push("--append-system-prompt", tmpFile);
 	args.push(`Task:\n${opts.task}`);
 
