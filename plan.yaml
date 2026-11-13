@@ -258,3 +258,271 @@ items:
       - loader reads the config from the extension folder (module-relative)
       - agents-folder config is ignored
       - project-local .pi override still wins per property
+
+  # ---------------------------------------------------------------- v0.2.0 epic (redo)
+  - ref: thinking-config                # KB-1
+    type: epic
+    title: Per-agent model and thinking-level configuration (v0.2.0)
+    description: |
+      kb-workflow subagents are configurable only by model today, and the
+      thinking level of the dispatching session is forwarded only when the
+      model is inherited — an explicit model silently drops it. SPEC v0.2.0
+      (FR-16..FR-22) replaces the `models` object with a `kb-agents` shape
+      carrying `model` and `thinking-level` per role (planner, developer,
+      reviewer and the fourth role, qa), merges the extension-folder and
+      project-local configs per single property, validates the thinking
+      level, resolves both properties per role with independent fallback to
+      the session, forwards `--model` and `--thinking` independently, and
+      rewrites the docs and the shipped configs.
+      This is a redo of the work first specced on 2026-11-11, on top of
+      v0.1.3: the config is now read from the extension folder (FR-15), so
+      the old `models` format is no longer read anywhere and the shipped
+      configs must be rewritten in the same change (FR-22).
+      Done when AC-23..AC-30 hold.
+    priority: high
+    acceptance:
+      - AC-23 a kb-agents config resolves model and thinking-level per role and both reach the spawned pi process as --model / --thinking
+      - AC-24 an old models-format config is ignored entirely; fallbacks apply
+      - AC-25 extension-folder and project configs merge per property
+      - AC-26 an unknown thinking-level is ignored and the session level is forwarded
+      - AC-27 a role defining only model spawns with --model <configured> and --thinking <session level>
+      - AC-28 a fully absent role inherits the session model and thinking level
+      - AC-29 the qa role is resolved like the other three
+      - AC-30 README, the index.ts header comment, kb-workflow.example.json and the repo's kb-workflow.json show the kb-agents format
+    children:
+      - ref: config-new-shape           # KB-2
+        type: story
+        title: kb-agents config shape with per-property merge, validation and per-role resolution
+        description: |
+          The old `models` object cannot express a thinking level per role,
+          and the shipped config is now actually read (v0.1.3), so the shape
+          must change for real rather than be layered on.
+          This story reworks the pure config module and its loader around a
+          `kb-agents` object where each of the four roles
+          (planner/developer/reviewer/qa) is `{ "model": string,
+          "thinking-level": string }`, both properties optional. The old
+          `models` format is no longer supported: a file without a valid
+          `kb-agents` object contributes nothing and is ignored silently.
+          The extension-folder and project-local files merge deeply, per
+          single property, and resolution returns model and thinking level
+          per role with independent fallback to the dispatching session.
+          Done when AC-23, AC-24, AC-25, AC-26, AC-27, AC-28 and AC-29 hold
+          for the config layer.
+        priority: high
+        acceptance:
+          - AC-23 a kb-agents config resolves model and thinking-level per role
+          - AC-24 an old models-format config is ignored entirely; fallbacks apply
+          - AC-25 extension-folder and project configs merge per property
+          - AC-26 an unknown thinking-level is ignored and treated as unset
+          - AC-29 the qa role is resolved like the other three
+        children:
+          - ref: config-kb-agents-shape   # KB-3
+            type: task
+            title: Parse and validate the kb-agents shape in the pure config module
+            description: |
+              The current parser only knows a flat `models` map, so a
+              thinking level cannot be expressed per role and the qa role
+              has no place for one.
+              In the PURE `lib/config.ts` replace the `models` parsing with
+              a `kb-agents` object: each of planner, developer, reviewer and
+              qa maps to an object whose `model` and `thinking-level`
+              properties are both optional. A file without a valid
+              `kb-agents` object — including an old `models`-format file —
+              contributes nothing (FR-17) and is never fatal (NFR-12).
+              Validate `thinking-level` against the pi levels
+              off|minimal|low|medium|high|xhigh|max; an unknown value is
+              ignored (treated as unset) and never causes a hard failure
+              (FR-19). The module stays pure: no filesystem, no pi-package
+              imports except the `ThinkingLevel` type (NFR-13/NFR-14).
+              The old-shape tests in `lib/config.test.ts` are replaced by
+              tests for the new shape.
+              Done when AC-23, AC-24 and AC-26 hold at the parse/validate
+              level and the old-shape tests are gone.
+            priority: high
+            points: 3
+            tests:
+              - kb-agents config parses model and thinking-level for all four roles including qa
+              - role object with only model or only thinking-level parses without error
+              - old models-format config yields no kb-agents entries
+              - unknown thinking-level is dropped and treated as unset
+              - malformed or non-object config never throws
+            blocks: [config-deep-merge]
+            acceptance:
+              - AC-23 the pure config module exposes model and thinking-level per role from a kb-agents file
+              - AC-24 a file without a valid kb-agents object contributes nothing
+              - AC-26 a thinking-level outside off|minimal|low|medium|high|xhigh|max is ignored, never fatal
+          - ref: config-deep-merge       # KB-4
+            type: task
+            title: Deep per-property merge of the extension-folder and project configs
+            description: |
+              Roles must be configurable partly globally and partly
+              project-locally, and the current loader shallow-merges whole
+              role strings so one file always wins entirely.
+              In `lib/config-load.ts` keep the FR-15 locations (extension
+              folder global + project-local `.pi/kb-workflow.json`, later
+              wins) but merge the two files deeply, per single property
+              (FR-18): for each role, `model` and `thinking-level` are
+              merged independently, in both directions — a role may take its
+              model from one file and its thinking level from the other.
+              A file in the old `models` format contributes nothing.
+              Done when AC-25 holds.
+            priority: high
+            points: 2
+            tests:
+              - role takes model from the extension-folder config and thinking-level from the project config
+              - role takes model from the project config and thinking-level from the extension-folder config
+              - project property overrides the same property from the extension-folder config
+              - an old models-format file contributes nothing to the merge
+            blocks: [config-resolution]
+            acceptance:
+              - AC-25 a role defined in both files takes model from one and thinking-level from the other when each file defines only one
+          - ref: config-resolution       # KB-5
+            type: task
+            title: resolveAgentConfig returns model and thinking level per role with independent fallback
+            description: |
+              Callers need both resolved values per role from one place, and
+              the fallback must be per property: today an explicit model
+              silently drops the session's thinking level.
+              Provide `resolveAgentConfig` in `lib/config.ts` returning, for
+              each role, the configured model and thinking level, each
+              falling back independently to the dispatching session's value
+              (FR-20): unset or invalid thinking level → the session's
+              thinking level, always forwarded even when the model is
+              explicit; unset model → the session's model. The qa role is
+              resolved like the other three (AC-29). Keep the pure module
+              free of filesystem and pi-runtime imports.
+              Done when AC-27, AC-28 and AC-29 hold.
+            priority: high
+            points: 2
+            tests:
+              - role with only model resolves to that model and the session thinking level
+              - role absent from the config resolves to the session model and thinking level
+              - role with an unknown thinking-level resolves to the session thinking level
+              - qa role resolves model and thinking-level like planner, developer and reviewer
+            acceptance:
+              - AC-27 a role defining only model resolves to the configured model plus the session thinking level
+              - AC-28 a fully absent role resolves to the session model and thinking level
+              - AC-29 the qa role is resolved like the other three
+
+      - ref: subagent-dispatch          # KB-6
+        type: story
+        title: Subagent dispatch forwards model and thinking level independently
+        description: |
+          Today the thinking level is only forwarded when the model is
+          inherited; an explicit model silently drops the session's thinking
+          level. SPEC v0.2.0 (FR-21) requires `--model` and `--thinking` to
+          be passed independently, with the session's thinking level always
+          forwarded as fallback.
+          This story changes `runSubagent` and the dispatch layer: the
+          dispatchers now live in `lib/bare-mode.ts`, `lib/message-mode.ts`
+          and `lib/dispatch.ts`, with their seams injected by `index.ts`, so
+          both dispatch paths must call `resolveAgentConfig` and forward
+          both properties per role.
+          Done when AC-23, AC-27 and AC-28 hold end to end.
+        priority: high
+        acceptance:
+          - AC-23 model and thinking-level resolved per role reach the spawned pi process as --model / --thinking
+          - AC-27 a role defining only model spawns with --model <configured> and --thinking <session level>
+          - AC-28 a fully absent role inherits the session model and thinking level
+        children:
+          - ref: subagent-run-flags       # KB-7
+            type: task
+            title: runSubagent passes --model and --thinking independently
+            description: |
+              `runSubagent` currently builds its args with
+              `if (model) --model else if (thinkingLevel) --thinking`, so an
+              explicit model always suppresses the session's thinking level.
+              Change `lib/subagent.ts` so `--model` and `--thinking` are
+              built independently of each other (FR-21): `--model` carries
+              the model resolved for the role, `--thinking` the resolved
+              thinking level (configured, or the dispatching session's level
+              as fallback). Neither flag suppresses the other; a property
+              that resolves to nothing is simply not passed.
+              Done when AC-27 and AC-28 hold at the CLI-args level.
+            priority: high
+            points: 3
+            tests:
+              - role with explicit model receives both --model <configured> and --thinking <session level>
+              - absent role inherits the session model and thinking level
+              - configured thinking-level is passed as --thinking without a --model
+            blocks: [index-dispatch]
+            acceptance:
+              - AC-27 a role defining only model spawns with --model <configured> and --thinking <session level>
+              - AC-28 a fully absent role inherits the session model and thinking level
+          - ref: index-dispatch           # KB-8
+            type: task
+            title: bare-mode, message-mode and dispatch forward both properties per role
+            description: |
+              Both dispatch paths must use the new per-role resolution, and
+              the dispatchers no longer live in `index.ts`: they are
+              `lib/bare-mode.ts`, `lib/message-mode.ts` and `lib/dispatch.ts`,
+              with their seams (subagent runner, kb, config) injected by
+              `index.ts`.
+              Update the dispatchers so every subagent round — bare mode and
+              message mode alike — calls `resolveAgentConfig` for the role
+              and forwards both the model and the thinking level to
+              `runSubagent`, each falling back independently to the
+              dispatching session's value (FR-20/FR-21). The `index.ts`
+              wiring supplies the session model and thinking level through
+              the existing seams; the `kb_agent` tool goes through the same
+              resolution. The `index.ts` header comment is updated to
+              document the new `kb-agents` shape (FR-22).
+              Done when AC-23 and AC-29 hold for both dispatch paths and the
+              header comment shows the new format.
+            priority: high
+            points: 3
+            tests:
+              - bare-mode round resolves and forwards model and thinking-level per role
+              - message-mode round resolves and forwards model and thinking-level per role
+              - qa role round forwards its configured model and thinking-level
+              - kb_agent tool forwards the resolved model and thinking level
+            blocks: [docs-update]
+            acceptance:
+              - AC-23 both dispatch paths forward the resolved model and thinking-level per role
+              - AC-29 the qa role is resolved like the other three
+              - AC-30 the index.ts header comment documents the kb-agents format
+
+      - ref: docs-update                # KB-9
+        type: story
+        title: Documentation and shipped configs rewritten in the kb-agents format
+        description: |
+          Users discover the config format from the README and the example
+          files, and since v0.1.3 the shipped `kb-workflow.json` is actually
+          read; after FR-17 an old-format file is silently ignored, so a
+          docs-only change would silently disable every configured role.
+          This story rewrites the "Model configuration" section of
+          `README.md`, the `index.ts` header comment, `kb-workflow.example.json`
+          and the repo's own `kb-workflow.json` in the `kb-agents` format
+          with per-role `model` and `thinking-level` (FR-22).
+          Done when AC-30 holds.
+        priority: medium
+        acceptance:
+          - AC-30 README, the index.ts header comment, kb-workflow.example.json and the repo's kb-workflow.json show the kb-agents format
+        children:
+          - ref: docs-readme-examples    # KB-10
+            type: task
+            title: README, header comment and both config files show the kb-agents format
+            description: |
+              FR-22: documentation and the shipped configs must match the new
+              format. This is load-bearing, not cosmetic: since v0.1.3 the
+              config shipped in the extension folder IS read, and after
+              FR-17 a file still in the old `models` format is silently
+              ignored — every role would quietly fall back to the session
+              model.
+              Rewrite the "Model configuration" section of `README.md` to
+              describe `kb-agents` with per-role `model` and
+              `thinking-level` (the four roles including qa, the allowed
+              thinking levels, the per-property merge, the independent
+              fallback rules), rewrite the `index.ts` header comment, and
+              convert `kb-workflow.example.json` and the repo's
+              `kb-workflow.json` to the new format.
+              Done when AC-30 holds and no shipped file uses `models`.
+            priority: medium
+            points: 2
+            tests:
+              - README Model configuration section documents kb-agents with model and thinking-level for all four roles
+              - kb-workflow.example.json uses the kb-agents format
+              - repo kb-workflow.json uses the kb-agents format
+              - no shipped config file still uses the models key
+            acceptance:
+              - AC-30 README, the index.ts header comment, kb-workflow.example.json and the repo's kb-workflow.json document/show the new kb-agents format
