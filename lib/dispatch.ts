@@ -1,5 +1,5 @@
 /**
- * Argument parsing and mode dispatch for the /kb-dev command (FR-9 / FR-10).
+ * Argument parsing and mode dispatch for the /kb-dev command (FR-10 / FR-11).
  *
  * The dispatchers no longer live in `index.ts`: this module wires both mode
  * runners from the seams injected by `index.ts` (subagent runner, kb, config).
@@ -8,8 +8,9 @@
  * round — bare mode and message mode alike — resolves the per-role config
  * with `resolveAgentConfig` (FR-20) and forwards both the model and the
  * thinking level to the subagent runner (FR-21). The bare runner resolves
- * its single element via `kb next` (NFR-7); the message runner builds the
- * fixed kickoff template (FR-10).
+ * the next unit via the FR-11 chain (epic-scoped story -> board-wide story
+ * -> single task/bug) and works one story per invocation; the message runner
+ * builds the fixed kickoff template (FR-10).
  */
 
 import type { KbWorkflowConfig, SessionFallbacks } from "./config.ts";

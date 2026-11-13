@@ -6,10 +6,11 @@
  *                    then SPEC.md is written/versioned at the project root and the
  *                    kb-planner subagent turns it into plan.yaml + kb board import.
  *   /kb-dev [msg]    Completes pending reviews, then either works the next
- *                    available board-level element (kb next): a kb-developer
- *                    subagent implements it (kb resolves the DAG via blockers),
- *                    then a kb-reviewer subagent reviews and merges it — one
- *                    element per invocation; or, with a message argument,
+ *                    available story per the kb DAG (FR-11 chain: epic-scoped
+ *                    story -> board-wide story -> single task/bug): every task
+ *                    gets a kb-developer round on its own branch and a
+ *                    kb-reviewer round with merge into develop — one story
+ *                    per invocation; or, with a message argument,
  *                    delivers the message to the main agent as a kickoff that
  *                    identifies and works the pertinent items in DAG order.
  *
@@ -239,8 +240,9 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 	});
 
 	// ---------------------------------------------------------------------------
-	// Command: /kb-dev [message] — bare mode works one board-level element per
-	// invocation (FR-9); message mode delivers a kickoff to the main agent (FR-10).
+	// Command: /kb-dev [message] — bare mode works one story per invocation
+	// (FR-11, superseding FR-9); message mode delivers a kickoff to the main
+	// agent (FR-10).
 	// ---------------------------------------------------------------------------
 	pi.registerCommand("kb-dev", {
 		description:
@@ -284,10 +286,11 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 			let report: string;
 			let delivered = true;
 			try {
-				// Mode dispatch (FR-9 vs FR-10): a bare invocation works the next
-				// board-level element via `kb next` (one element per invocation);
-				// a message argument hands the message to the main agent as a
-				// kickoff. Exactly one mode runs.
+				// Mode dispatch (FR-11 vs FR-10): a bare invocation resolves the
+				// next unit via the epic -> story -> task chain and works one
+				// story (or fallback task/bug) per invocation; a message argument
+				// hands the message to the main agent as a kickoff.
+				// Exactly one mode runs.
 				const result = await dispatchDev({
 					args,
 					cwd,
