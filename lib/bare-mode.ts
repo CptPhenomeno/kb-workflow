@@ -1,5 +1,5 @@
 /**
- * Bare-mode orchestration for /kb-dev (SPEC v0.1.1, FR-9).
+ * Bare-mode orchestration for /kb-dev (SPEC v0.1.2, FR-11).
  *
  * After the FR-1 pre-flight the handler:
  *   1. completes the review of any items already sitting in the `review`
@@ -16,8 +16,8 @@
  *      task/bug through its one cycle; then stops.
  *
  * If `kb next` exits 2 (nothing available), the user is notified and no
- * action is taken. The handler adds no own ordering (NFR-7): the kb DAG
- * decides which element comes next.
+ * action is taken. The handler adds no own ordering: the kb DAG decides
+ * which unit comes next.
  *
  * All side-effectful seams (kb CLI, subagent spawns, notifications) are
  * injected so the flow is unit-testable without real subagents.
@@ -174,8 +174,7 @@ export interface ResolvedUnit {
  *   3. with no story, a single task or bug with `kb next`;
  *   4. nothing at any level → null (the caller notifies the user).
  * Exit code 2 means "nothing available at this level"; any other non-zero
- * code is an error. The handler adds no own ordering (NFR-7): the kb DAG
- * decides.
+ * code is an error. The handler adds no own ordering: the kb DAG decides.
  */
 export async function resolveUnit(
 	deps: Pick<BareModeDeps, "kb">,
@@ -303,7 +302,8 @@ export async function runBareDev(deps: BareModeDeps): Promise<BareModeResult> {
 	const notify = deps.notify ?? (() => {});
 
 	// 1. Complete the review of items already sitting in the review column,
-	//    board-wide, one kb-reviewer round per item (FR-9 step 1, AC-13).
+	//    board-wide, routed by type (FR-12, AC-13/AC-18): tasks/subtasks to
+	//    kb-reviewer, stories/epics to kb-qa.
 	await sweepPendingReviews(deps, report);
 
 	// 2. Resolve the unit of work via the FR-11 chain
