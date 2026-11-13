@@ -28,24 +28,43 @@ A [pi](https://github.com/badlogic/pi-mono) extension that drives the
 
 ## Model configuration
 
-Models for the subagents are resolved from (later wins):
+Models and thinking levels for the subagents are configured in a `kb-agents`
+object with one entry per role (`planner`, `developer`, `reviewer`, `qa`),
+resolved from two files (later wins):
 
-1. `<agentDir>/kb-workflow.json` — e.g. `~/.pi/agent/kb-workflow.json` (global)
+1. `<extension folder>/kb-workflow.json` — the copy shipped in the extension's
+   own folder (e.g. `~/.pi/agent/extensions/kb-workflow/kb-workflow.json`, global)
 2. `<project>/.pi/kb-workflow.json` — project-local override
 
 ```json
 {
-	"models": {
-		"planner": "anthropic/claude-sonnet-4-5",
-		"developer": "anthropic/claude-haiku-4-5",
-		"reviewer": "anthropic/claude-sonnet-4-5",
-		"qa": "anthropic/claude-sonnet-4-5"
+	"kb-agents": {
+		"planner":   { "model": "anthropic/claude-sonnet-4-5", "thinking-level": "high" },
+		"developer": { "model": "anthropic/claude-haiku-4-5", "thinking-level": "medium" },
+		"reviewer":  { "model": "anthropic/claude-sonnet-4-5", "thinking-level": "low" },
+		"qa":         { "model": "anthropic/claude-sonnet-4-5", "thinking-level": "low" }
 	}
 }
 ```
 
-See `kb-workflow.example.json`. A role left unset inherits the model active in
-the dispatching pi session.
+Both `model` and `thinking-level` are optional per role. The two files merge
+deeply, per single property: each role's `model` and `thinking-level` are
+merged independently, so a role may take its model from one file and its
+thinking level from the other. The old `models` format (a plain role → model
+string map) is **no longer supported**: a config file without a valid
+`kb-agents` object is silently ignored.
+
+`thinking-level` accepts the thinking levels recognized by pi: `off`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`. An unknown value is
+treated as unset.
+
+Fallback rules (per property, independent of each other): a role without a
+`model` inherits the model active in the dispatching pi session; a role
+without a (valid) `thinking-level` inherits the thinking level of that
+session — the session's thinking level is always forwarded, including when
+the model is explicitly configured.
+
+See `kb-workflow.example.json`.
 
 ## Install
 

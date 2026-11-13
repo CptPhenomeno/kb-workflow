@@ -19,8 +19,10 @@
  *   kb_agent         Run a kb-planner / kb-developer / kb-reviewer / kb-qa subagent
  *                    in an isolated pi process.
  *
- * Model config (v0.2.0 `kb-agents` format): <agentDir>/kb-workflow.json merged
- * with <project>/.pi/kb-workflow.json. Each of the four roles is an object with
+ * Model config (v0.2.0 `kb-agents` format): the kb-workflow.json shipped in
+ * the extension's own folder, merged with the project-local
+ * <project>/.pi/kb-workflow.json override (later wins, per single property).
+ * Each of the four roles is an object with
  * two optional properties, resolved independently per role:
  *   {
  *     "kb-agents": {
