@@ -63,6 +63,34 @@ function okAgent(output: string) {
 	return { ok: true, output, stderr: "", errorMessage: undefined };
 }
 
+const notFound = (): KbRun => kbRun({ error: "not found", message: "nothing available" }, 2);
+
+/**
+ * Script the FR-11 resolution chain: `next` handlers keyed by the query shape
+ * (`--type epic`, `--type story [--parent X]`, plain `next`). Each slot is an
+ * item (code 0) or "none" (code 2, nothing available at that level).
+ */
+function chainNext(script: {
+	epic?: KbItem | "none";
+	scopedStory?: KbItem | "none";
+	story?: KbItem | "none";
+	task?: KbItem | "none";
+}): (args: string[]) => KbRun {
+	return (args) => {
+		const has = (flag: string) => args.includes(flag);
+		if (has("epic")) return script.epic && script.epic !== "none" ? kbRun(script.epic) : notFound();
+		if (has("story") && has("--parent"))
+			return script.scopedStory && script.scopedStory !== "none" ? kbRun(script.scopedStory) : notFound();
+		if (has("story")) return script.story && script.story !== "none" ? kbRun(script.story) : notFound();
+		return script.task && script.task !== "none" ? kbRun(script.task) : notFound();
+	};
+}
+
+/** The `next` handler for a bare task-level run: typed queries find nothing. */
+function taskOnlyNext(task: KbItem): (args: string[]) => KbRun {
+	return chainNext({ task });
+}
+
 test("bare invocation reviews pending review items before retrieving", async (t) => {
 	const dir = tmpRepo();
 	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -84,7 +112,7 @@ test("bare invocation reviews pending review items before retrieving", async (t)
 				"next",
 				(args) => {
 					events.push(`kb ${args.join(" ")}`);
-					return kbRun(nextItem);
+					return taskOnlyNext(nextItem)(args);
 				},
 			],
 			["show", () => kbRun(nextItem)],
@@ -109,42 +137,46 @@ test("bare invocation reviews pending review items before retrieving", async (t)
 	// both pending items reviewed (deterministic order: position, then id)
 	// before kb next runs
 	assert.deepEqual(events.slice(0, 3), ["kb list --status review", "reviewer KB-4", "reviewer KB-9"]);
-	assert.equal(events[3], "kb next");
+	// the FR-11 chain starts with the epic query
+	assert.equal(events[3], "kb next --type epic");
 	// then the retrieved element is worked
 	assert.ok(events.includes("dev KB-13"));
 });
 
-test("bare invocation takes the first kb-next element regardless of story", async (t) => {
+test("bare invocation takes the first story per kb next --type story", async (t) => {
 	const dir = tmpRepo();
 	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-	// element belongs to story KB-8, which is NOT first by position
-	const nextItem = item("KB-13", "task", "todo", "KB-8");
-	nextItem.position = 42;
+	// no epic available; the first story per kb next --type story is the unit
+	const story = item("KB-8", "story", "doing", "KB-1");
 	const script: ScriptedKb = {
 		calls: [],
 		responses: new Map([
 			["list", () => kbRun([])],
-			["next", () => kbRun(nextItem)],
-			["show", () => kbRun(nextItem)],
+			["next", chainNext({ story })],
 		]),
 	};
 
-	let devId: string | null = null;
-	await runBareDev({
+	const events: string[] = [];
+	const result = await runBareDev({
 		cwd: dir,
 		kb: fakeKb(script),
-		spawnReviewer: async () => okAgent("reviewed"),
-		spawnDev: async (i) => {
-			devId = i.id;
+		spawnReviewer: async () => {
+			events.push("reviewer");
+			return okAgent("reviewed");
+		},
+		spawnDev: async () => {
+			events.push("dev");
 			return okAgent("implemented");
 		},
 	});
 
-	// kb next is called at board level: no --parent filter
-	const nextCall = script.calls.find((c) => c[0] === "next");
-	assert.deepEqual(nextCall, ["next"]);
-	assert.equal(devId, "KB-13");
+	// the story query drives the selection
+	assert.ok(script.calls.some((c) => c.join(" ") === "next --type story"));
+	// one unit per invocation: the story is the resolved unit
+	assert.ok(result.report.includes("KB-8"));
+	// the handler adds no own ordering and no task is picked directly
+	assert.ok(!script.calls.some((c) => c.length === 1 && c[0] === "next"));
 });
 
 test("bare invocation completes one element then stops", async (t) => {
@@ -156,7 +188,7 @@ test("bare invocation completes one element then stops", async (t) => {
 		calls: [],
 		responses: new Map([
 			["list", () => kbRun([])],
-			["next", () => kbRun(nextItem)],
+			["next", taskOnlyNext(nextItem)],
 			["show", () => kbRun(nextItem)],
 		]),
 	};
@@ -177,8 +209,8 @@ test("bare invocation completes one element then stops", async (t) => {
 
 	// exactly one dev round and one reviewer round for the element
 	assert.deepEqual(events, ["dev KB-13", "reviewer KB-13"]);
-	// kb next is called exactly once: no loop over further elements
-	assert.equal(script.calls.filter((c) => c[0] === "next").length, 1);
+	// the plain kb next (task/bug fallback) is called exactly once: no loop over further elements
+	assert.equal(script.calls.filter((c) => c.length === 1 && c[0] === "next").length, 1);
 	// the report mentions the element and its final state
 	assert.ok(result.report.includes("KB-13"));
 	assert.ok(result.report.includes("review"));
@@ -272,7 +304,7 @@ test("bare-mode story completion triggers the kb-qa story review", async (t) => 
 		calls: [],
 		responses: new Map([
 			["list", () => kbRun([])],
-			["next", () => kbRun(taskItem)],
+			["next", taskOnlyNext(taskItem)],
 			["show", (args) => {
 				const id = args[1];
 				if (id === "KB-13") return kbRun(taskItem);
@@ -320,7 +352,7 @@ test("all-stories-done triggers the epic kb-qa review", async (t) => {
 		calls: [],
 		responses: new Map([
 			["list", () => kbRun([])],
-			["next", () => kbRun(taskItem)],
+			["next", taskOnlyNext(taskItem)],
 			["show", (args) => {
 				const id = args[1];
 				if (id === "KB-13") return kbRun(taskItem);
@@ -368,7 +400,7 @@ test("no kb-qa round when the parent story is not in review", async (t) => {
 		calls: [],
 		responses: new Map([
 			["list", () => kbRun([])],
-			["next", () => kbRun(taskItem)],
+			["next", taskOnlyNext(taskItem)],
 			["show", (args) => (args[1] === "KB-13" ? kbRun(taskItem) : kbRun(story))],
 		]),
 	};
@@ -403,7 +435,7 @@ test("bare invocation retries a failed developer round once, then reviews on suc
 		calls: [],
 		responses: new Map([
 			["list", () => kbRun([])],
-			["next", () => kbRun(nextItem)],
+			["next", taskOnlyNext(nextItem)],
 			["show", () => kbRun(nextItem)],
 		]),
 	};
@@ -428,4 +460,198 @@ test("bare invocation retries a failed developer round once, then reviews on suc
 
 	assert.equal(devCalls, 2);
 	assert.deepEqual(events, ["dev KB-13 try 1", "dev KB-13 try 2", "reviewer KB-13"]);
+});
+
+// --- KB-34: FR-11 resolution chain (epic → story → task) ---
+
+test("available epic scopes the story resolved via kb next --type story --parent <epic>", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const epic = item("KB-1", "epic", "doing", null);
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", chainNext({ epic, scopedStory: story })],
+		]),
+	};
+
+	const events: string[] = [];
+	const result = await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnReviewer: async () => {
+			events.push("reviewer");
+			return okAgent("reviewed");
+		},
+		spawnDev: async () => {
+			events.push("dev");
+			return okAgent("implemented");
+		},
+	});
+
+	// chain order: epic query first, then the epic-scoped story query
+	assert.deepEqual(script.calls.filter((c) => c[0] === "next"), [
+		["next", "--type", "epic"],
+		["next", "--type", "story", "--parent", "KB-1"],
+	]);
+	// the scoped story is the resolved unit; no board-wide story query ran
+	assert.ok(!script.calls.some((c) => c.join(" ") === "next --type story"));
+	assert.ok(result.report.includes("KB-8"));
+});
+
+test("with no epic or empty scoped query, the story is resolved board-wide via kb next --type story", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	// case A: no epic available at all
+	const storyA = item("KB-8", "story", "doing", "KB-1");
+	const scriptA: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", chainNext({ story: storyA })],
+		]),
+	};
+	await runBareDev({
+		cwd: dir,
+		kb: fakeKb(scriptA),
+		spawnReviewer: async () => okAgent("reviewed"),
+		spawnDev: async () => okAgent("implemented"),
+	});
+	assert.ok(scriptA.calls.some((c) => c.join(" ") === "next --type story"));
+
+	// case B: an epic is available but the scoped query returns nothing
+	// (e.g. the story was reopened under a done epic)
+	const epic = item("KB-2", "epic", "doing", null);
+	const storyB = item("KB-9", "story", "todo", "KB-2");
+	const scriptB: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", chainNext({ epic, scopedStory: "none", story: storyB })],
+		]),
+	};
+	const resultB = await runBareDev({
+		cwd: dir,
+		kb: fakeKb(scriptB),
+		spawnReviewer: async () => okAgent("reviewed"),
+		spawnDev: async () => okAgent("implemented"),
+	});
+	assert.deepEqual(scriptB.calls.filter((c) => c[0] === "next"), [
+		["next", "--type", "epic"],
+		["next", "--type", "story", "--parent", "KB-2"],
+		["next", "--type", "story"],
+	]);
+	assert.ok(resultB.report.includes("KB-9"));
+});
+
+test("with no story available, a single task or bug is resolved via kb next", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	// a task reopened under a done story: no story available, task fallback
+	const taskItem = item("KB-13", "task", "todo", "KB-8");
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", chainNext({ task: taskItem })],
+			["show", () => kbRun(taskItem)],
+		]),
+	};
+
+	const events: string[] = [];
+	await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnReviewer: async (i) => {
+			events.push(`reviewer ${i.id}`);
+			return okAgent("reviewed");
+		},
+		spawnDev: async (i) => {
+			events.push(`dev ${i.id}`);
+			return okAgent("implemented");
+		},
+	});
+
+	// the full chain ran in order and the plain kb next resolved the unit
+	assert.deepEqual(script.calls.filter((c) => c[0] === "next"), [
+		["next", "--type", "epic"],
+		["next", "--type", "story"],
+		["next"],
+	]);
+	assert.deepEqual(events, ["dev KB-13", "reviewer KB-13"]);
+});
+
+test("nothing available at any level notifies the user without side effects", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", chainNext({})],
+		]),
+	};
+
+	const notifications: Array<{ message: string; level: string }> = [];
+	const events: string[] = [];
+	const result = await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		notify: (message, level) => notifications.push({ message, level }),
+		spawnReviewer: async () => {
+			events.push("reviewer");
+			return okAgent("reviewed");
+		},
+		spawnDev: async () => {
+			events.push("dev");
+			return okAgent("implemented");
+		},
+	});
+
+	assert.deepEqual(events, []); // no subagent ran
+	assert.equal(notifications.length, 1);
+	assert.equal(notifications[0].level, "info");
+	assert.ok(/nothing available/i.test(notifications[0].message));
+	// the whole chain was queried before giving up
+	assert.deepEqual(script.calls.filter((c) => c[0] === "next"), [
+		["next", "--type", "epic"],
+		["next", "--type", "story"],
+		["next"],
+	]);
+	// no board mutation and no task/branch side effects via kb
+	assert.ok(script.calls.every((c) => c[0] === "list" || c[0] === "next"));
+	assert.ok(/nothing available/i.test(result.report));
+});
+
+test("bare invocation with no story available notifies the user without side effects", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	// no story and no task/bug either: nothing to work at any level
+	const script: ScriptedKb = {
+		calls: [],
+		responses: new Map([
+			["list", () => kbRun([])],
+			["next", chainNext({})],
+		]),
+	};
+
+	const notifications: Array<{ message: string; level: string }> = [];
+	await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		notify: (message, level) => notifications.push({ message, level }),
+		spawnReviewer: async () => okAgent("reviewed"),
+		spawnDev: async () => okAgent("implemented"),
+	});
+
+	assert.equal(notifications.length, 1);
+	assert.equal(notifications[0].level, "info");
+	assert.ok(/nothing available/i.test(notifications[0].message));
 });

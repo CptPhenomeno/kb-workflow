@@ -135,6 +135,71 @@ export async function qaRoundsOnCompletion(
 	return reviewed;
 }
 
+/** The unit of work resolved by the FR-11 chain. */
+export interface ResolvedUnit {
+	unit: KbItem;
+	/** Human-readable provenance, e.g. "epic KB-1-scoped story". */
+	via: string;
+}
+
+/**
+ * Resolve the unit of work with the FR-11 fallback chain, stopping at the
+ * first success:
+ *   1. `kb next --type epic` — an available epic scopes the selection:
+ *      the story is resolved with `kb next --type story --parent <epic>`;
+ *   2. with no epic (or an empty scoped query), the story is resolved
+ *      board-wide with `kb next --type story`;
+ *   3. with no story, a single task or bug with `kb next`;
+ *   4. nothing at any level → null (the caller notifies the user).
+ * Exit code 2 means "nothing available at this level"; any other non-zero
+ * code is an error. The handler adds no own ordering (NFR-7): the kb DAG
+ * decides.
+ */
+export async function resolveUnit(
+	deps: Pick<BareModeDeps, "kb">,
+	report: string[],
+): Promise<ResolvedUnit | null | "error"> {
+	const tryNext = async (args: string[]): Promise<KbRun | "none" | "error"> => {
+		const res = await deps.kb(args);
+		if (res.code === 2) return "none";
+		if (res.code !== 0) {
+			report.push(`- kb ${args.join(" ")} failed: ${kbErrorMessage(res)}`);
+			return "error";
+		}
+		return res;
+	};
+
+	// 1. An available epic scopes the story selection.
+	const epicRes = await tryNext(["next", "--type", "epic"]);
+	if (epicRes === "error") return "error";
+	if (epicRes !== "none") {
+		const epic = epicRes.json as KbItem;
+		const scoped = await tryNext(["next", "--type", "story", "--parent", epic.id]);
+		if (scoped === "error") return "error";
+		if (scoped !== "none") {
+			return { unit: scoped.json as KbItem, via: `epic ${epic.id}-scoped story` };
+		}
+		// Empty scoped query: fall through to the board-wide story query.
+	}
+
+	// 2. Board-wide story (covers stories reopened under a done epic).
+	const storyRes = await tryNext(["next", "--type", "story"]);
+	if (storyRes === "error") return "error";
+	if (storyRes !== "none") {
+		return { unit: storyRes.json as KbItem, via: "board-wide story" };
+	}
+
+	// 3. Single task or bug (covers items reopened under a done story).
+	const taskRes = await tryNext(["next"]);
+	if (taskRes === "error") return "error";
+	if (taskRes !== "none") {
+		return { unit: taskRes.json as KbItem, via: "task/bug fallback" };
+	}
+
+	// 4. Nothing available at any level.
+	return null;
+}
+
 export async function runBareDev(deps: BareModeDeps): Promise<BareModeResult> {
 	const report: string[] = ["# /kb-dev report — board-level run", ""];
 	const notify = deps.notify ?? (() => {});
@@ -143,20 +208,27 @@ export async function runBareDev(deps: BareModeDeps): Promise<BareModeResult> {
 	//    board-wide, one kb-reviewer round per item (FR-9 step 1, AC-13).
 	await sweepPendingReviews(deps, report);
 
-	// 2. Resolve the next element at board level (FR-9 step 2, AC-11).
-	const next = await deps.kb(["next"]);
-	if (next.code === 2) {
-		notify("Nothing available on the board: no task or bug is ready to work on.", "info");
-		report.push("", "Nothing available on the board (`kb next` found no task or bug ready to work on).");
+	// 2. Resolve the unit of work via the FR-11 chain
+	//    (epic-scoped story → board-wide story → single task/bug).
+	const resolved = await resolveUnit(deps, report);
+	if (resolved === "error") {
+		notify("kb next failed while resolving the unit of work; see the report.", "error");
 		return { report: report.join("\n") };
 	}
-	if (next.code !== 0) {
-		const msg = kbErrorMessage(next);
-		notify(`kb next failed: ${msg}`, "error");
-		report.push(`- kb next failed: ${msg}`);
+	if (!resolved) {
+		notify("Nothing available on the board at any level (epic → story → task).", "info");
+		report.push("", "Nothing available on the board at any level (epic → story → task): nothing to work on.");
 		return { report: report.join("\n") };
 	}
-	const element = next.json as KbItem;
+	const element = resolved.unit;
+	if (element.type === "story" || element.type === "epic") {
+		// The story is the unit of work; its task loop (FR-11 "worked in
+		// full") is driven by the story loop.
+		report.push(
+			`- resolved unit: ${element.type} ${element.id} "${element.title}" (${resolved.via}); one ${element.type} per invocation.`,
+		);
+		return { report: report.join("\n") };
+	}
 
 	// 3. Work exactly that one element through its full cycle, then stop.
 	let devOk = false;
