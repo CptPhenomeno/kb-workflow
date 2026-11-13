@@ -4,12 +4,58 @@ import {
 	mergeKbAgents,
 	parseKbAgents,
 	parseThinkingLevel,
+	resolveAgentConfig,
 	resolveAgentModel,
+	type SessionFallbacks,
 	type AgentRole,
 	type KbWorkflowConfig,
 } from "./config.ts";
 
 const roles: AgentRole[] = ["planner", "developer", "reviewer", "qa"];
+
+const session: SessionFallbacks = { model: "session/model", thinkingLevel: "medium" };
+
+// resolveAgentConfig — per-role resolution with independent fallbacks (KB-5, FR-20)
+
+test("fully absent role resolves to unset model and unset thinking-level", () => {
+	const resolved = resolveAgentConfig("planner", {}, {});
+	assert.equal(resolved.model, undefined);
+	assert.equal(resolved.thinkingLevel, undefined);
+});
+
+test("role with only model resolves to that model and the session thinking level", () => {
+	const config: KbWorkflowConfig = { kbAgents: { developer: { model: "d/m" } } };
+	const resolved = resolveAgentConfig("developer", config, session);
+	assert.deepEqual(resolved, { model: "d/m", thinkingLevel: "medium" }); // AC-27
+});
+
+test("role absent from the config resolves to the session model and thinking level", () => {
+	const resolved = resolveAgentConfig("reviewer", {}, session);
+	assert.deepEqual(resolved, { model: "session/model", thinkingLevel: "medium" }); // AC-28
+});
+
+test("role with an unknown thinking-level resolves to the session thinking level", () => {
+	// invalid levels are dropped at parse time (FR-19), so the fallback applies
+	const parsed = parseKbAgents({ "kb-agents": { qa: { model: "q/m", "thinking-level": "banana" } } });
+	const resolved = resolveAgentConfig("qa", { kbAgents: parsed }, session);
+	assert.deepEqual(resolved, { model: "q/m", thinkingLevel: "medium" });
+});
+
+test("qa role resolves model and thinking-level like planner, developer and reviewer", () => {
+	const config: KbWorkflowConfig = {
+		kbAgents: {
+			planner: { model: "p/m", thinkingLevel: "high" },
+			developer: { model: "d/m" },
+			reviewer: { thinkingLevel: "low" },
+			qa: { model: "q/m", thinkingLevel: "low" },
+		},
+	};
+	for (const role of roles) {
+		const resolved = resolveAgentConfig(role, config, session);
+		assert.equal(resolved.model, config.kbAgents![role]!.model ?? session.model);
+		assert.equal(resolved.thinkingLevel, config.kbAgents![role]!.thinkingLevel ?? session.thinkingLevel);
+	} // AC-29
+});
 
 test("kb-agents config parses model and thinking-level for all four roles including qa", () => {
 	const parsed = parseKbAgents({

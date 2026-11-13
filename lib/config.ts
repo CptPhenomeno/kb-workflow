@@ -116,6 +116,31 @@ export function mergeKbAgents(global: KbAgentsConfig, project: KbAgentsConfig): 
 	return merged;
 }
 
+/** Session values used as fallbacks when a role's config is unset. */
+export interface SessionFallbacks {
+	model?: string;
+	thinkingLevel?: ThinkingLevel;
+}
+
+/**
+ * Resolve both the model and the thinking level for a role in one place.
+ * Each property falls back independently to the dispatching session's
+ * value when unset (or invalid, since invalid levels are dropped at parse
+ * time) in the config — always forwarded, including when the model is
+ * explicitly configured (FR-20).
+ */
+export function resolveAgentConfig(
+	role: AgentRole,
+	config: KbWorkflowConfig,
+	session?: SessionFallbacks,
+): RoleConfig {
+	const roleConfig = config.kbAgents?.[role] ?? {};
+	return {
+		model: roleConfig.model ?? session?.model,
+		thinkingLevel: roleConfig.thinkingLevel ?? session?.thinkingLevel,
+	};
+}
+
 /** Resolve the model for a role; falls back to the caller's active model when unset. */
 export function resolveAgentModel(role: AgentRole, config: KbWorkflowConfig, fallback?: string): string | undefined {
 	return config.kbAgents?.[role]?.model ?? config.models?.[role] ?? fallback;
