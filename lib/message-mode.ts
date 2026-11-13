@@ -14,7 +14,8 @@
  * flow is unit-testable without a real pi session.
  */
 
-import { sweepPendingReviews, type AgentRoundResult } from "./bare-mode.ts";
+import { resolveForRole, sweepPendingReviews, type AgentRoundResult } from "./bare-mode.ts";
+import type { RoleConfig, KbWorkflowConfig, SessionFallbacks } from "./config.ts";
 import type { KbItem, KbRun } from "./kb.ts";
 
 export interface MessageModeDeps {
@@ -23,12 +24,16 @@ export interface MessageModeDeps {
 	message: string;
 	/** Stands in for `runKb(args, cwd)`. */
 	kb: (args: string[]) => Promise<KbRun>;
+	/** Parsed kb-workflow config for the per-role resolution (FR-20). */
+	config?: KbWorkflowConfig;
+	/** The dispatching session's model and thinking level (fallbacks, FR-20). */
+	session?: SessionFallbacks;
 	/** Stands in for `preFlightCheck(cwd)` (FR-1). */
 	preFlight: () => Promise<{ ok: boolean; error?: string; branch?: string }>;
 	/** Spawn the kb-reviewer subagent for a task/subtask in the review column. */
-	spawnReviewer: (item: KbItem) => Promise<AgentRoundResult>;
+	spawnReviewer: (item: KbItem, resolved: RoleConfig) => Promise<AgentRoundResult>;
 	/** Spawn the kb-qa subagent for a story/epic in the review column (FR-13). */
-	spawnQa: (item: KbItem) => Promise<AgentRoundResult>;
+	spawnQa: (item: KbItem, resolved: RoleConfig) => Promise<AgentRoundResult>;
 	/** Stands in for `pi.sendUserMessage(text)`. */
 	sendUserMessage: (text: string) => void | Promise<void>;
 	/** Optional UI notifications (message + level). */

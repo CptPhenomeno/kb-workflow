@@ -23,8 +23,11 @@
  * injected so the flow is unit-testable without real subagents.
  */
 
+import { resolveAgentConfig, type KbWorkflowConfig, type RoleConfig, type SessionFallbacks } from "./config.ts";
 import { runDeveloperRound } from "./orchestration.ts";
 import { kbErrorMessage, type KbItem, type KbRun } from "./kb.ts";
+import { roleOf } from "./agent-tool.ts";
+import type { KbAgentName } from "./subagent.ts";
 
 /** What a subagent round returns (the relevant slice of SubagentResult). */
 export interface AgentRoundResult {
@@ -38,12 +41,16 @@ export interface BareModeDeps {
 	cwd: string;
 	/** Stands in for `runKb(args, cwd)`. */
 	kb: (args: string[]) => Promise<KbRun>;
-	/** Spawn the kb-developer subagent for a task. */
-	spawnDev: (task: KbItem) => Promise<AgentRoundResult>;
+	/** Parsed kb-workflow config for the per-role resolution (FR-20). */
+	config?: KbWorkflowConfig;
+	/** The dispatching session's model and thinking level (fallbacks, FR-20). */
+	session?: SessionFallbacks;
+	/** Spawn the kb-developer subagent for a task, with the resolved config. */
+	spawnDev: (task: KbItem, resolved: RoleConfig) => Promise<AgentRoundResult>;
 	/** Spawn the kb-reviewer subagent for a task/subtask in the review column. */
-	spawnReviewer: (item: KbItem) => Promise<AgentRoundResult>;
+	spawnReviewer: (item: KbItem, resolved: RoleConfig) => Promise<AgentRoundResult>;
 	/** Spawn the kb-qa subagent for a story/epic in the review column (FR-13). */
-	spawnQa: (item: KbItem) => Promise<AgentRoundResult>;
+	spawnQa: (item: KbItem, resolved: RoleConfig) => Promise<AgentRoundResult>;
 	/** Optional UI notifications (message + level). */
 	notify?: (message: string, level: "info" | "error") => void;
 	/** Optional UI status line updates. */
@@ -68,6 +75,17 @@ const reportRound = (report: string[], kind: string, item: KbItem, r: AgentRound
 	if (!r.ok) report.push(`  error: ${r.errorMessage ?? ""} ${r.stderr.trim().slice(0, 300)}`);
 };
 
+/**
+ * Resolve both properties for a role against the injected config and session
+ * (FR-20): each falls back independently to the dispatching session's value.
+ */
+export function resolveForRole(
+	agent: KbAgentName,
+	deps: Pick<BareModeDeps, "config" | "session">,
+): RoleConfig {
+	return resolveAgentConfig(roleOf(agent), deps.config ?? {}, deps.session);
+}
+
 /** True when the item is reviewed by kb-reviewer (task-level, FR-4 merge chain). */
 function isTaskLevel(item: KbItem): boolean {
 	return item.type === "task" || item.type === "subtask" || item.type === "bug";
@@ -80,7 +98,7 @@ function isTaskLevel(item: KbItem): boolean {
  * Shared by both retrieval modes (NFR-6). Returns the swept items.
  */
 export async function sweepPendingReviews(
-	deps: Pick<BareModeDeps, "kb" | "spawnReviewer" | "spawnQa" | "setStatus">,
+	deps: Pick<BareModeDeps, "kb" | "config" | "session" | "spawnReviewer" | "spawnQa" | "setStatus">,
 	report: string[],
 ): Promise<KbItem[]> {
 	const reviewRes = await deps.kb(["list", "--status", "review"]);
@@ -94,11 +112,11 @@ export async function sweepPendingReviews(
 	for (const item of reviewItems) {
 		if (isTaskLevel(item)) {
 			deps.setStatus?.(`review ${item.id}`);
-			const rev = await deps.spawnReviewer(item);
+			const rev = await deps.spawnReviewer(item, resolveForRole("kb-reviewer", deps));
 			reportRound(report, "review", item, rev);
 		} else {
 			deps.setStatus?.(`qa ${item.id}`);
-			const qa = await deps.spawnQa(item);
+			const qa = await deps.spawnQa(item, resolveForRole("kb-qa", deps));
 			reportRound(report, "qa review", item, qa);
 		}
 	}
@@ -115,7 +133,7 @@ export async function sweepPendingReviews(
  * one-element loop and the story loop of FR-11 alike.
  */
 export async function qaRoundsOnCompletion(
-	deps: Pick<BareModeDeps, "kb" | "spawnQa" | "setStatus">,
+	deps: Pick<BareModeDeps, "kb" | "config" | "session" | "spawnQa" | "setStatus">,
 	report: string[],
 	itemId: string,
 ): Promise<KbItem[]> {
@@ -131,7 +149,7 @@ export async function qaRoundsOnCompletion(
 		// Only stories and epics get kb-qa rounds (FR-12/FR-13).
 		if (!parent || parent.status !== "review" || isTaskLevel(parent)) break;
 		deps.setStatus?.(`qa ${parent.id}`);
-		const qa = await deps.spawnQa(parent);
+		const qa = await deps.spawnQa(parent, resolveForRole("kb-qa", deps));
 		reportRound(report, "qa review", parent, qa);
 		reviewed.push(parent);
 		currentId = parent.id;
@@ -219,10 +237,11 @@ async function runTaskCycle(
 	let devOk = false;
 	for (let attempt = 1; attempt <= MAX_DEV_TRIES && !devOk; attempt++) {
 		deps.setStatus?.(`dev ${task.id} (try ${attempt})`);
+		const resolved = resolveForRole("kb-developer", deps);
 		const round = await runDeveloperRound({
 			cwd: deps.cwd,
 			task,
-			spawnDev: () => deps.spawnDev(task),
+			spawnDev: () => deps.spawnDev(task, resolved),
 		});
 		const dev = round.result;
 		devOk = dev.ok;
@@ -240,7 +259,7 @@ async function runTaskCycle(
 	// A failed review means the task's cycle did not complete (it is not
 	// merged/done), so the caller must not move on to the next task.
 	deps.setStatus?.(`review ${task.id}`);
-	const rev = await deps.spawnReviewer(task);
+	const rev = await deps.spawnReviewer(task, resolveForRole("kb-reviewer", deps));
 	reportRound(report, "review", task, rev);
 	return rev.ok;
 }

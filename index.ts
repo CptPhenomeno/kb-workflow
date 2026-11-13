@@ -18,9 +18,21 @@
  *   kb_agent         Run a kb-planner / kb-developer / kb-reviewer / kb-qa subagent
  *                    in an isolated pi process.
  *
- * Model config: <agentDir>/kb-workflow.json merged with <project>/.pi/kb-workflow.json
- *   { "models": { "planner": "provider/model", "developer": "...", "reviewer": "...", "qa": "..." } }
- * Missing roles inherit the active model of the dispatching session.
+ * Model config (v0.2.0 `kb-agents` format): <agentDir>/kb-workflow.json merged
+ * with <project>/.pi/kb-workflow.json. Each of the four roles is an object with
+ * two optional properties, resolved independently per role:
+ *   {
+ *     "kb-agents": {
+ *       "planner":   { "model": "provider/model", "thinking-level": "high" },
+ *       "developer": { "model": "provider/model", "thinking-level": "medium" },
+ *       "reviewer":  { "model": "provider/model", "thinking-level": "low" },
+ *       "qa":        { "model": "provider/model", "thinking-level": "low" }
+ *     }
+ *   }
+ * A missing model falls back to the model active in the dispatching pi session;
+ * a missing (or invalid) thinking level falls back to that session's thinking
+ * level — always forwarded, including when the model is explicitly configured
+ * (FR-20). The old `models` format is no longer supported (FR-17).
  */
 
 import * as fs from "node:fs";
@@ -29,20 +41,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { resolveAgentModel, type AgentRole } from "./lib/config.ts";
+import { executeKbAgent } from "./lib/agent-tool.ts";
 import { loadKbWorkflowConfig } from "./lib/config-load.ts";
-import { kbErrorMessage, runKb, type KbItem } from "./lib/kb.ts";
+import { kbErrorMessage, runKb } from "./lib/kb.ts";
 import { preFlightCheck } from "./lib/git.ts";
-import { runBareDev } from "./lib/bare-mode.ts";
-import { runMessageDev } from "./lib/message-mode.ts";
 import { dispatchDev } from "./lib/dispatch.ts";
-import { actorForAgent, runSubagent, type KbAgentName } from "./lib/subagent.ts";
+import { runSubagent, type KbAgentName } from "./lib/subagent.ts";
 
 const AgentParam = StringEnum(["kb-planner", "kb-developer", "kb-reviewer", "kb-qa"] as const, {
 	description: "Which kb subagent to run",
 });
-
-const roleOf = (agent: KbAgentName): AgentRole => agent.replace("kb-", "") as AgentRole;
 
 const textResult = (t: string) => ({
 	content: [{ type: "text" as const, text: t }],
@@ -70,54 +78,6 @@ Write the result to \`SPEC.md\` at the project root (the cwd):
 PHASE 4 — KANBAN PLANNING
 Call the \`kb_agent\` tool with agent "kb-planner" and a task that instructs it to: read the latest version of SPEC.md, generate \`plan.yaml\` at the project root following the plan format documented in \`kb guide\`, validate it with \`kb import plan.yaml --dry-run\`, and import it into the board (run \`kb init\` if \`.kanban/\` is missing; use \`kb import plan.yaml --update\` when the refs already exist on the board).
 Finally, report to the user: the plan structure (epics/stories/tasks) and the import result.`;
-}
-
-function devTask(task: KbItem, story?: KbItem | null): string {
-	const where = story
-		? ` of story ${story.id} ("${story.title}")`
-		: "";
-	return [
-		`Implement kanban item ${task.id} ("${task.title}")${where} in the project rooted at the cwd.`,
-		``,
-		`Follow your system prompt (kb-developer) and the appended kb guide exactly:`,
-		`- claim the item as agent-dev-${task.id}`,
-		`- run \`kb show ${task.id} --json\` and read its spec link (e.g. SPEC.md#...) before coding`,
-		`- TDD loop: phase red -> write failing tests -> test fail -> phase green -> implement -> test pass -> phase refactor -> accept check -> note -> move to review`,
-		`- if a move is refused (exit code 3), satisfy every entry in \`unmet\`; never work around the rules`,
-		`- renew the claim with \`kb touch ${task.id}\` during long work`,
-		``,
-		`Finish with a short summary: files changed, tests run and their result, final board status of ${task.id}. Do not touch other board items.`,
-	].join("\n");
-}
-
-function reviewTask(item: KbItem): string {
-	return [
-		`Review kanban item ${item.id} ("${item.title}"), currently in the "review" column, in the project rooted at the cwd.`,
-		``,
-		`Follow your system prompt (kb-reviewer) and the appended kb guide exactly:`,
-		`- act as agent-review-${item.id}`,
-		`- run \`kb show ${item.id} --json\`; all declared tests must be passing`,
-		`- re-run the project test suite yourself and check \`git diff\` for quality issues`,
-		`- if OK: check all acceptance criteria, add a note, move the item to done`,
-		`- if problems: add a note listing them and move the item back to todo (or leave in review if the move is refused)`,
-		``,
-		`Finish with the verdict (OK / problems) and the final board status of ${item.id}. Do not implement fixes yourself.`,
-	].join("\n");
-}
-
-function qaTask(item: KbItem): string {
-	return [
-		`QA-review kanban item ${item.id} ("${item.title}"), currently in the "review" column, in the project rooted at the cwd.`,
-		``,
-		`Follow your system prompt (kb-qa) and the appended kb guide exactly:`,
-		`- act as agent-qa-${item.id}`,
-		`- run \`kb show ${item.id} --json\` and validate every acceptance criterion against the merged work on develop`,
-		`- if OK: verify that every task branch of this ${item.type} (feature/<ID>, fix/<ID>) is merged into develop (tip is an ancestor of develop), delete the merged branches with \`git branch -d\`, check all acceptance criteria, add a note and move the item to done`,
-		`- if problems: add a note listing them and move the item back to todo`,
-		`- NEVER merge any branch yourself and never delete a branch with anything but \`git branch -d\``,
-		``,
-		`Finish with the verdict (OK / problems), the branches verified and deleted, and the final board status of ${item.id}.`,
-	].join("\n");
 }
 
 export default function kbWorkflow(pi: ExtensionAPI) {
@@ -223,16 +183,22 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const agent = params.agent as KbAgentName;
 			const config = loadKbWorkflowConfig(ctx.cwd);
-			const fallback = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-			const model = resolveAgentModel(roleOf(agent), config, fallback);
-			const res = await runSubagent({
+			const session = {
+				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+				thinkingLevel: ctx.thinkingLevel,
+			};
+			const res = await executeKbAgent({
 				agent,
 				task: params.task,
-				cwd: ctx.cwd,
-				model,
-				thinkingLevel: model === fallback ? ctx.thinkingLevel : undefined,
-				signal,
-				onUpdate: (t) => onUpdate?.({ content: [{ type: "text", text: t }], details: { agent, running: true } }),
+				config,
+				session,
+				runSubagent: (opts) =>
+					runSubagent({
+						...opts,
+						cwd: ctx.cwd,
+						signal,
+						onUpdate: (t) => onUpdate?.({ content: [{ type: "text", text: t }], details: { agent, running: true } }),
+					}),
 			});
 			const header = res.ok
 				? `Subagent ${agent} completed.`
@@ -305,71 +271,40 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 				return;
 			}
 
-			// Models for the subagents (same resolution rules as v0.1.0, NFR-6).
+			// Per-role model and thinking-level resolution (FR-20): the
+			// dispatchers resolve each role against this config and session
+			// and forward both properties to runSubagent (FR-21).
 			const config = loadKbWorkflowConfig(cwd);
-			const fallbackModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-			const devModel = resolveAgentModel("developer", config, fallbackModel);
-			const revModel = resolveAgentModel("reviewer", config, fallbackModel);
-			const qaModel = resolveAgentModel("qa", config, fallbackModel);
-
-			// Resolve the parent story of a task for its dev prompt (best effort).
-			const storyCache = new Map<string, KbItem | null>();
-			const storyOf = async (task: KbItem): Promise<KbItem | null> => {
-				if (!task.parent) return null;
-				if (storyCache.has(task.parent)) return storyCache.get(task.parent) ?? null;
-				const res = await runKb(["show", task.parent], cwd);
-				const story = (res.code === 0 ? res.json : undefined) as KbItem | undefined;
-				storyCache.set(task.parent, story ?? null);
-				return story ?? null;
+			const session = {
+				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+				thinkingLevel: ctx.thinkingLevel,
 			};
 
-		const spawnReviewer = (item: KbItem) =>
-			runSubagent({ agent: "kb-reviewer", cwd, model: revModel, task: reviewTask(item) });
-
-		// kb-qa rounds: stories and epics in review (FR-12/FR-13). kb-qa never
-		// merges — it verifies ancestry and deletes the merged task branches.
-		const spawnQa = (item: KbItem) =>
-			runSubagent({ agent: "kb-qa", cwd, model: qaModel, task: qaTask(item) });
-
-		ctx.ui.setStatus("kb-dev", "running");
-		let report: string;
-		let delivered = true;
-		try {
-			// Mode dispatch (FR-9 vs FR-10): a bare invocation works the next
-			// board-level element via `kb next` (one element per invocation);
-			// a message argument hands the message to the main agent as a
-			// kickoff. Exactly one mode runs.
-			const result = await dispatchDev({
-				args,
-				runBare: () =>
-					runBareDev({
-						cwd,
-						kb: (a) => runKb(a, cwd),
-						spawnDev: async (task) =>
-							runSubagent({ agent: "kb-developer", cwd, model: devModel, task: devTask(task, await storyOf(task)) }),
-						spawnReviewer,
-						spawnQa,
-						notify: (msg, level) => ctx.ui.notify(msg, level),
-						setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
-					}),
-				runMessage: (message) =>
-					runMessageDev({
-						cwd,
-						message,
-						kb: (a) => runKb(a, cwd),
-						preFlight: () => preFlightCheck(cwd),
-						spawnReviewer,
-						spawnQa,
-						sendUserMessage: (text) => pi.sendUserMessage(text),
-						notify: (msg, level) => ctx.ui.notify(msg, level),
-						setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
-					}),
-			});
-			report = result.report;
-			delivered = result.delivered ?? true;
-		} finally {
-			ctx.ui.setStatus("kb-dev", undefined);
-		}
+			ctx.ui.setStatus("kb-dev", "running");
+			let report: string;
+			let delivered = true;
+			try {
+				// Mode dispatch (FR-9 vs FR-10): a bare invocation works the next
+				// board-level element via `kb next` (one element per invocation);
+				// a message argument hands the message to the main agent as a
+				// kickoff. Exactly one mode runs.
+				const result = await dispatchDev({
+					args,
+					cwd,
+					config,
+					session,
+					kb: (a) => runKb(a, cwd),
+					preFlight: () => preFlightCheck(cwd),
+					runSubagent: (opts) => runSubagent({ ...opts, cwd }),
+					sendUserMessage: (text) => pi.sendUserMessage(text),
+					notify: (msg, level) => ctx.ui.notify(msg, level),
+					setStatus: (status) => ctx.ui.setStatus("kb-dev", status),
+				});
+				report = result.report;
+				delivered = result.delivered ?? true;
+			} finally {
+				ctx.ui.setStatus("kb-dev", undefined);
+			}
 
 		ctx.ui.notify(
 			delivered ? "Finished the /kb-dev run. See the report in chat." : "/kb-dev aborted; see the report in chat.",

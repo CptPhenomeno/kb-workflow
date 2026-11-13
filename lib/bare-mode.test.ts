@@ -1020,3 +1020,76 @@ test("bare invocation with no story available notifies the user without side eff
 	assert.equal(notifications[0].level, "info");
 	assert.ok(/nothing available/i.test(notifications[0].message));
 });
+
+// ---------------------------------------------------------------------------
+// KB-8: per-role model and thinking-level resolution in the dispatchers.
+// ---------------------------------------------------------------------------
+
+test("bare-mode round resolves and forwards model and thinking-level per role", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const task = item("KB-42", "task", "todo", null);
+	const seen: Array<{ role: string; model?: string; thinkingLevel?: string }> = [];
+
+	await runBareDev({
+		cwd: dir,
+		kb: fakeKb({
+			calls: [],
+			responses: new Map([
+				["list", () => kbRun([])],
+				["next", () => kbRun(task)],
+				["show", (args) => kbRun(args.includes("KB-42") ? task : notFound())],
+			]),
+		}),
+		config: {
+			kbAgents: {
+				developer: { model: "provider/dev", thinkingLevel: "high" },
+				reviewer: { thinkingLevel: "low" }, // model unset -> session model
+			},
+		},
+		session: { model: "provider/session", thinkingLevel: "medium" },
+		spawnDev: async (_i, resolved) => {
+			seen.push({ role: "developer", ...resolved });
+			return okAgent("dev ok");
+		},
+		spawnReviewer: async (_i, resolved) => {
+			seen.push({ role: "reviewer", ...resolved });
+			return okAgent("review ok");
+		},
+	});
+
+	assert.deepEqual(seen, [
+		{ role: "developer", model: "provider/dev", thinkingLevel: "high" },
+		{ role: "reviewer", model: "provider/session", thinkingLevel: "low" },
+	]);
+});
+
+test("qa role round forwards its configured model and thinking-level", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const story = item("KB-1", "story", "review");
+	const seen: Array<{ model?: string; thinkingLevel?: string }> = [];
+
+	await runBareDev({
+		cwd: dir,
+		kb: fakeKb({
+			calls: [],
+			responses: new Map([
+				["list", () => kbRun([story])],
+				["next", () => notFound()],
+			]),
+		}),
+		config: {
+			kbAgents: { qa: { model: "provider/qa", thinkingLevel: "xhigh" } },
+		},
+		session: { model: "provider/session", thinkingLevel: "medium" },
+		spawnQa: async (_i, resolved) => {
+			seen.push({ ...resolved });
+			return okAgent("qa ok");
+		},
+	});
+
+	assert.deepEqual(seen, [{ model: "provider/qa", thinkingLevel: "xhigh" }]);
+});

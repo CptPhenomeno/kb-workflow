@@ -237,3 +237,33 @@ test("message mode sweep routes stories/epics to kb-qa and tasks to kb-reviewer"
 	// kb-reviewer, the story and the epic go to kb-qa — before the kickoff.
 	assert.deepEqual(events, ["qa KB-1", "qa KB-8", "reviewer KB-9", "kickoff"]);
 });
+
+// ---------------------------------------------------------------------------
+// KB-8: per-role model and thinking-level resolution in message mode too.
+// ---------------------------------------------------------------------------
+
+test("message-mode round resolves and forwards model and thinking-level per role", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const reviewItem = item("KB-7", "review");
+	const seen: Array<{ model?: string; thinkingLevel?: string }> = [];
+
+	await runMessageDev({
+		cwd: dir,
+		message: "finish the reviews",
+		kb: fakeKb(new Map([["list", () => kbRun([reviewItem])]]), []),
+		preFlight: async () => ({ ok: true, branch: "develop" as const }),
+		config: {
+			kbAgents: { reviewer: { model: "provider/rev", thinkingLevel: "low" } },
+		},
+		session: { model: "provider/session", thinkingLevel: "medium" },
+		spawnReviewer: async (_i, resolved) => {
+			seen.push({ ...resolved });
+			return { ok: true, output: "ok", stderr: "" };
+		},
+		sendUserMessage: async () => {},
+	});
+
+	assert.deepEqual(seen, [{ model: "provider/rev", thinkingLevel: "low" }]);
+});
