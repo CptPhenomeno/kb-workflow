@@ -161,3 +161,41 @@ export async function isMerged(cwd: string, branch: string): Promise<boolean> {
 export async function deleteMergedBranch(cwd: string, branch: string): Promise<void> {
 	await runGitChecked(["branch", "-d", branch], cwd);
 }
+
+export interface BranchCleanupResult {
+	/** False when any existing branch is not merged into develop. */
+	ok: boolean;
+	/** Branches deleted with `git branch -d` (empty when ok is false). */
+	deleted: string[];
+	/** Existing branches whose tip is not an ancestor of develop. */
+	problems: string[];
+}
+
+/**
+ * kb-qa branch cleanup (SPEC v0.1.2, FR-13 step 2, FR-7): verify that the
+ * tip of every existing task branch is an ancestor of `develop` before
+ * deleting anything. When all branches are merged, delete each with the
+ * safe `git branch -d`. When any branch is not merged, delete nothing and
+ * report the unmerged branches as problems — the caller treats that as a
+ * failed qa review. Branches that do not exist (e.g. deleted by an earlier
+ * round) are skipped. Local only, never `-D` (NFR-1, NFR-2).
+ */
+export async function verifyAndDeleteTaskBranches(
+	cwd: string,
+	branches: string[],
+): Promise<BranchCleanupResult> {
+	const existing: string[] = [];
+	const problems: string[] = [];
+	for (const branch of branches) {
+		if (!(await branchExists(cwd, branch))) continue;
+		existing.push(branch);
+		if (!(await isMerged(cwd, branch))) problems.push(branch);
+	}
+	if (problems.length > 0) {
+		return { ok: false, deleted: [], problems };
+	}
+	for (const branch of existing) {
+		await deleteMergedBranch(cwd, branch);
+	}
+	return { ok: true, deleted: existing, problems: [] };
+}

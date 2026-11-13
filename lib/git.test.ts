@@ -180,6 +180,69 @@ test("deletion uses -d and refuses unmerged branches", async (t) => {
 	t.assert.equal(await branchExists(dir, "feature/KB-14"), false);
 });
 
+// --- KB-25: all-branches-merged verification gates deletion (FR-13 step 2, FR-7) ---
+
+import { verifyAndDeleteTaskBranches } from "./git.ts";
+
+test("all-branches-merged verification gates deletion", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	// story with two task branches: one merged into develop, one not
+	execSync("git checkout -b feature/KB-21", { cwd: dir });
+	commit(dir, "f.txt", "f", "merged work");
+	execSync("git checkout develop", { cwd: dir });
+	execSync("git merge --ff-only feature/KB-21", { cwd: dir });
+
+	execSync("git checkout -b fix/KB-22", { cwd: dir });
+	commit(dir, "u.txt", "u", "unmerged work");
+	execSync("git checkout develop", { cwd: dir });
+
+	// one branch is not an ancestor of develop: nothing is deleted,
+	// the unmerged branch is reported as a problem
+	const refused = await verifyAndDeleteTaskBranches(dir, [
+		"feature/KB-21",
+		"fix/KB-22",
+	]);
+	t.assert.equal(refused.ok, false);
+	t.assert.deepEqual(refused.problems, ["fix/KB-22"]);
+	t.assert.deepEqual(refused.deleted, []);
+	t.assert.equal(await branchExists(dir, "feature/KB-21"), true);
+	t.assert.equal(await branchExists(dir, "fix/KB-22"), true);
+
+	// merge the second branch too: now all tips are ancestors of
+	// develop and every branch is deleted with `git branch -d`
+	execSync("git merge --ff-only fix/KB-22", { cwd: dir });
+	const ok = await verifyAndDeleteTaskBranches(dir, [
+		"feature/KB-21",
+		"fix/KB-22",
+	]);
+	t.assert.equal(ok.ok, true);
+	t.assert.deepEqual(ok.problems, []);
+	t.assert.deepEqual(ok.deleted, ["feature/KB-21", "fix/KB-22"]);
+	t.assert.equal(await branchExists(dir, "feature/KB-21"), false);
+	t.assert.equal(await branchExists(dir, "fix/KB-22"), false);
+});
+
+test("missing task branches are skipped, not treated as problems", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	execSync("git checkout -b feature/KB-21", { cwd: dir });
+	commit(dir, "f.txt", "f", "work");
+	execSync("git checkout develop", { cwd: dir });
+	execSync("git merge --ff-only feature/KB-21", { cwd: dir });
+
+	// a branch deleted by an earlier round simply no longer exists
+	const res = await verifyAndDeleteTaskBranches(dir, [
+		"feature/KB-21",
+		"feature/KB-99",
+	]);
+	t.assert.equal(res.ok, true);
+	t.assert.deepEqual(res.problems, []);
+	t.assert.deepEqual(res.deleted, ["feature/KB-21"]);
+});
+
 test("dirty tree aborts the run before any kb or git mutation", async (t) => {
 	const dir = tmpRepo();
 	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
