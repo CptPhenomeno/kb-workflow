@@ -1,117 +1,233 @@
 spec: SPEC.md
 status: todo
 items:
-  - ref: retrieval-modes
+  # ---------------------------------------------------------------- v0.1.2 epic
+  - ref: story-retrieval-v012
     type: epic
-    title: Dual-mode /kb-dev work retrieval (v0.1.1)
+    title: Story-level bare retrieval and kb-qa review routing (v0.1.2)
     description: |
-      /kb-dev today picks the first open story by board position and works it
-      to exhaustion; the user cannot steer a run and the top-level selection
-      ignores the board DAG. SPEC.md v0.1.1 replaces only the retrieval step
-      with two modes: bare invocation takes the first available task/bug from
-      the whole board via `kb next` (one element per invocation, pending
-      review items first); `/kb-dev <message>` passes the message as a kickoff
-      to the main pi agent, which identifies the pertinent items (asking the
-      user when ambiguous) and works them in DAG order through the unchanged
-      v0.1.0 per-task pipeline.
-      Done when all acceptance criteria AC-11..AC-16 of SPEC.md v0.1.1 are met.
+      v0.1.1 made the bare mode work one task per invocation; in practice
+      the story is the unit of work — a story's tasks build on each other
+      and only make sense together. SPEC.md v0.1.2 (FR-11) returns the
+      bare `/kb-dev` invocation to story granularity: the story is
+      selected by the kb DAG via `kb next --type story`, all its tasks are
+      worked through their full branch/develop/review/merge cycles, then
+      the kb-qa story review runs (and the epic review if triggered) and
+      the invocation stops. The sweep routing and kb-qa trigger changes
+      (FR-12/FR-13/FR-14) are folded into KB-23 and depend on KB-22.
+      Done when AC-17 holds and the story-level retrieval is covered by
+      tests (AC-21).
     priority: high
-    blocks: [git-workflow, thinking-config]
     acceptance:
-      - AC-11 bare /kb-dev works exactly one element per the kb DAG and stops
-      - AC-12 bare /kb-dev with nothing available notifies the user, no side effects
-      - AC-13 pending review items are completed before new retrieval in bare mode
-      - AC-14 message mode delivers the kickoff and works items in DAG order
-      - AC-15 ambiguous messages trigger ask_user before any board/git change
-      - AC-16 tests cover both retrieval paths and the kickoff template
+      - AC-17 bare /kb-dev takes the first story per kb next --type story, works all its tasks, runs the kb-qa reviews and stops
+      - AC-21 story-level bare retrieval is covered by tests (kb next --type story, one story per invocation)
     children:
-      - ref: dev-retrieval-story
+      - ref: bare-story-retrieval
         type: story
-        title: /kb-dev retrieves work via kb next (bare) or user kickoff (message)
+        title: Bare /kb-dev works one unit per invocation via the epic → story → task chain
         description: |
-          The retrieval step of /kb-dev must respect the board DAG and be
-          steerable by the user, while the per-task machinery (pre-flight,
-          branch per task, dev/review rounds, merge chain, kb-qa) of v0.1.0
-          stays untouched and is shared by both modes.
-          This story implements FR-9 and FR-10: the handler parses the command
-          arguments, and either resolves one element with `kb next` at board
-          level (bare mode) or hands the message to the main pi agent via
-          `pi.sendUserMessage` with a fixed kickoff template (message mode).
-          Done when both retrieval modes drive the standard pipeline as
-          specified in FR-9 and FR-10.
+          The bare invocation must take the story as the unit of work
+          instead of a single task, selected by the kb DAG rather than by
+          board position.
+          This story reworks the already-implemented task-level bare mode
+          (lib/bare-mode.ts, lib/dispatch.ts, index.ts) per FR-11: after
+          the FR-1 pre-flight and the FR-12 sweep, the handler resolves
+          the unit via the epic-scoped fallback chain — `kb next --type
+          epic` scopes the selection, the story is resolved with
+          `kb next --type story --parent <epic>`, falling back to a
+          board-wide `kb next --type story`, then to a single `kb next`
+          task/bug (reopened items under done parents). One story per
+          invocation (or one task/bug in the fallback), scoped by the
+          first available epic: the handler works every task of the story
+          in DAG order (`kb next --parent <story>`) through the full
+          FR-2/FR-4 cycle, then runs the kb-qa story review (FR-13) and
+          the epic review if triggered, and stops. Nothing available at
+          any level notifies the user.
+          Done when FR-11 (resolution chain and unit work) holds and
+          AC-17 is met.
         priority: high
         children:
-          - ref: dev-bare-mode
+          - ref: bare-story-resolve
             type: task
-            title: Bare invocation works one board-level element from kb next
+            title: Bare invocation resolves the unit via the epic → story → task chain
             description: |
-              Selection today ignores the board DAG at the top level and
-              drains whole stories; a later, higher-priority unblocked task
-              never gets picked first.
-              The no-argument handler, after the FR-1 pre-flight, first
-              completes the review of items already in the review column,
-              then resolves the next element with `kb next` (no --parent
-              filter) and works exactly that one element through its full
-              FR-2/FR-4 cycle, then stops. If `kb next` exits 2, the user is
-              notified and nothing else happens. The handler adds no own
-              ordering (NFR-7).
-              Done when AC-11, AC-12 and AC-13 hold.
+              Selection at task level (v0.1.1) drains single tasks and
+              leaves stories half-finished; the story is the natural unit.
+              The bare-mode handler resolves the unit of work with the
+              FR-11 fallback chain, stopping at the first success:
+              1. `kb next --type epic` — if an epic is available, it scopes
+                 the selection: resolve the story with
+                 `kb next --type story --parent <epic>`;
+              2. if no epic is available (or the scoped query returns
+                 nothing), resolve the story board-wide with
+                 `kb next --type story` (covers stories reopened under a
+                 done epic);
+              3. if no story is available, resolve a single task or bug
+                 with `kb next` (covers tasks/bugs reopened under a done
+                 story);
+              4. if nothing is available at any level, notify the user
+                 and take no further action.
+              The epic only scopes which story is taken: the unit of work
+              is always one story (or, in the level-3 fallback, one
+              task/bug). The handler adds no own ordering.
+              Done when the bare invocation resolves the unit via the
+              epic → story → task chain and notifies the user when
+              nothing is available at any level.
             priority: high
             points: 3
             tests:
-              - bare invocation reviews pending review items before retrieving
-              - bare invocation takes the first kb-next element regardless of story
-              - bare invocation completes one element then stops
-              - bare invocation with nothing available notifies the user without side effects
-            blocks: [dev-retrieval-tests]
-          - ref: dev-message-mode
+              - available epic scopes the story resolved via kb next --type story --parent <epic>
+              - with no epic or empty scoped query, the story is resolved board-wide via kb next --type story
+              - with no story available, a single task or bug is resolved via kb next
+              - nothing available at any level notifies the user without side effects
+            blocks: [bare-story-loop]
+          - ref: bare-story-loop
             type: task
-            title: Message invocation delivers a kickoff to the main agent
+            title: Bare invocation works all story tasks through the full cycle then stops
             description: |
-              The user has no way to steer a /kb-dev run toward specific
-              items; the handler cannot interpret free-form requests.
-              After the FR-1 pre-flight, `/kb-dev <message>` first
-              completes the review of any items already sitting in the
-              `review` column — exactly the same deterministic board-wide
-              rounds as FR-9 step 1 (one kb-reviewer round per item, FR-4
-              merge chain) — and only then passes the
-              message to the main pi agent via `pi.sendUserMessage` using a
-              fixed kickoff template instructing the agent to: interpret the
-              message as operational instructions, identify the pertinent kb
-              items (by ID/ref or by matching titles/descriptions/test
-              states; generic requests must work), ask the user with
-              `ask_user` when the message is ambiguous or maps to no item
-              before any board or git change (NFR-8), and work the identified
-              items in DAG order through the standard pipeline. The handler
-              itself performs no board or git action beyond the pre-flight
-              and the pending-review rounds of step FR-10.2 (item selection
-              and orchestration belong to the main agent).
-              Done when AC-14 and AC-15 hold.
-            priority: medium
-            points: 3
+              A story's tasks build on each other; working only one per
+              invocation leaves the story incoherent and the develop branch
+              mid-feature.
+              The bare-mode loop works the whole resolved story: for each
+              of its tasks, in DAG order (`kb next --parent <story>` until
+              exit 2), run the full existing cycle — FR-2 branch per task,
+              kb-developer round with the existing retry policy, FR-4
+              review with merge. When every task of the story is done and
+              the story reaches `review`, the handler spawns the kb-qa
+              story review (FR-13); if the parent epic reaches `review` in
+              turn (all sibling stories done), the kb-qa epic review runs
+              too. The invocation then stops — one story per invocation
+              (the story branch of FR-11).
+              Done when a bare invocation finishes a whole story (tasks
+              cycled, story and, if triggered, epic reviewed) and stops.
+            priority: high
+            points: 5
             tests:
-              - message mode runs the pre-flight before delivering the kickoff
-              - message mode completes pending reviews before the kickoff
-              - kickoff template covers interpretation, identification, ask-first and DAG order
-              - ambiguous message triggers ask_user before any board or git change
-            blocks: [dev-retrieval-tests]
-          - ref: dev-retrieval-tests
+              - each story task runs the full branch/develop/review/merge cycle in DAG order
+              - story reaching review after all tasks spawns the kb-qa story review
+              - epic reaching review after all sibling stories spawns the kb-qa epic review
+              - invocation stops after the story and any epic review
+            blocks: [bare-story-tests]
+          - ref: bare-story-tests
             type: task
-            title: Extension tests cover both retrieval paths
+            title: Extension tests cover story-level bare retrieval
             description: |
-              AC-16 requires test coverage of the new retrieval logic so
-              regressions in argument parsing, bare-mode selection or the
-              kickoff template are caught.
-              The extension test suite gains tests for argument parsing
-              (bare vs message), the bare-mode single-element selection via
-              `kb next` (including review-first and nothing-available), and
-              the content of the kickoff template (operational
-              interpretation, item identification, ask-first rule, DAG
-              order).
-              Done when AC-16 holds and all new tests pass.
+              AC-21 requires test coverage of the reworked bare mode so
+              regressions in story selection or the story task loop are
+              caught.
+              The extension test suite gains tests for the story-level
+              retrieval: `kb next --type story` drives the selection, one
+              story is worked per invocation (its tasks in DAG order via
+              `kb next --parent`), and nothing-available notifies the user.
+              Done when the story-level bare retrieval is covered by
+              passing tests.
             priority: medium
-            points: 3
+            points: 2
             tests:
-              - argument parsing distinguishes bare and message invocations
-              - bare-mode selection is delegated to kb next, one element per invocation
-              - kickoff template contains interpretation, identification, ask-first and DAG-order rules
+              - kb next --type story drives retrieval, one story per invocation
+              - story task loop follows DAG order via kb next --parent
+
+  # ------------------------------------------------- updated existing items
+  - ref: dev-handler-story-review          # KB-21
+    type: story
+    title: Automatic kb-qa review of stories and epics with branch cleanup
+    description: |
+      Nobody currently reviews story/epic items themselves. Per the
+      uniform kb-qa trigger of SPEC.md v0.1.2 (FR-13, detailing FR-5/FR-6):
+      whenever a story or epic sits in the `review` column — left by a
+      previous run, reached by the bare story loop, or reached during
+      message-driven work — a kb-qa round runs on it: validate the item's
+      acceptance criteria (`kb show <ID> --json`) against the merged work
+      on `develop`; on success verify every task branch (`feature/<id>`,
+      `fix/<id>`) is merged into develop (tip is an ancestor of develop),
+      delete them with `git branch -d`, check all criteria, add a note and
+      move the item to `done`; on problems add a note and move it back to
+      `todo`. kb-qa never merges branches — task-level integration stays
+      with kb-reviewer (FR-4, NFR-10); only task branches are deleted,
+      only with `-d` (FR-7).
+      Done when AC-7 and AC-8 hold via kb-qa in all trigger paths.
+    priority: medium
+    acceptance:
+      - AC-7 story kb-qa review with branch deletion on success
+      - AC-8 epic kb-qa review when all stories are done; planner never spawned for review
+    children:
+      - ref: planner-agent-story-review      # KB-22
+        type: task
+        title: "kb-qa agent: system prompt and registration as fourth role"
+        description: |
+          FR-8/FR-5/FR-6/FR-7: a new agents/kb-qa.md system prompt
+          (identify as agent-qa-<story/epic ID>, kb show <ID> --json,
+          validate acceptance criteria against the merged work on
+          develop, verify branch ancestry, delete task branches with
+          git branch -d, move the item to done or back to todo with a
+          note); the kb_agent tool's agent parameter accepts kb-qa
+          alongside the other three roles; the model config gains a
+          qa role (models.qa / resolveAgentModel("qa", ...)) with the
+          same fallback-to-session-model rule. Only task branches are
+          deleted, never with -D. kb-qa never merges branches.
+          Done when kb-qa is a first-class agent usable via kb_agent.
+        priority: medium
+        points: 3
+        acceptance:
+          - no deleted branch tip is missing from develop
+          - kb-qa registered with prompt, tool enum entry and qa config role
+        tests:
+          - unmet criteria send the story back to todo with a note
+          - kb_agent tool accepts agent "kb-qa"
+          - models.qa resolves with fallback to the session model
+          - kb-qa deletes only merged task branches with -d
+        blocks: [handler-auto-review]
+      - ref: handler-auto-review            # KB-23
+        type: task
+        title: /kb-dev spawns kb-qa automatically at story and epic completion
+        description: |
+          The kb-qa trigger (FR-13) must fire identically whether the run
+          is driven by the DAG or by a user message; today nothing routes
+          stories/epics in review to kb-qa.
+          Three changes in the /kb-dev handler, sharing code between both
+          invocation modes. (1) The startup sweep (FR-12) routes items
+          already sitting in the `review` column by type: tasks and
+          subtasks to kb-reviewer rounds (FR-4 merge chain), stories and
+          epics to kb-qa rounds (FR-13). (2) In bare mode, the handler
+          spawns the kb-qa round when the story reaches `review` after all
+          its tasks are done — and the kb-qa epic round when all sibling
+          stories of the parent epic are done. (3) In message mode, the
+          kickoff template (FR-14) instructs the main agent to spawn a
+          kb-qa round for every story/epic that reaches `review` during
+          the message-driven work. kb-qa never merges (FR-4 stays with
+          kb-reviewer). Depends on KB-22 (kb-qa registration).
+          Done when AC-18, AC-19 and AC-20 hold in both modes.
+        priority: medium
+        points: 3
+        acceptance:
+          - AC-7 and AC-8 hold end to end
+        tests:
+          - all-tasks-done triggers the story kb-qa review
+          - all-stories-done triggers the epic kb-qa review
+          - final report lists branches, merge outcomes, review verdicts and deletions
+          - "sweep routes review items by type: tasks/subtasks to kb-reviewer, stories/epics to kb-qa"
+          - bare-mode story completion triggers the kb-qa story review
+          - kickoff template instructs the main agent to spawn kb-qa for stories/epics reaching review
+        blocks: [workflow-tests, tests-git-fixture]
+
+  - ref: tests-git-fixture                 # KB-25
+    type: task
+    title: Temp local git repo test fixture and workflow test suite
+    description: |
+      AC-10 required tests for the git workflow; most of that coverage
+      already exists in lib/git.test.ts thanks to the temp-git-repo
+      fixture: branch prefix choice by item type, branch reuse, the
+      ff→no-ff→abort merge chain, dirty-tree pre-flight, isMerged
+      ancestry and `-d` deletion are all covered.
+      What remains is the "all-branches-merged verification gates
+      deletion" test — the kb-qa behavior that refuses to delete a task
+      branch whose tip is not an ancestor of develop (depends on KB-23)
+      — plus an audit of AC-10 for any remaining gap, closing gaps found.
+      Done when the remaining AC-10 areas are covered by passing tests
+      and no test performs a remote operation.
+    priority: medium
+    points: 5
+    acceptance:
+      - AC-10 suite passes locally with git available
+    tests:
+      - all-branches-merged verification gates deletion
