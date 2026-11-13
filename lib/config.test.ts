@@ -1,18 +1,90 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveAgentModel, type AgentRole, type KbWorkflowConfig } from "./config.ts";
+import {
+	parseKbAgents,
+	parseThinkingLevel,
+	resolveAgentModel,
+	type AgentRole,
+	type KbWorkflowConfig,
+} from "./config.ts";
 
 const roles: AgentRole[] = ["planner", "developer", "reviewer", "qa"];
 
-test("models.qa resolves with fallback to the session model", () => {
-	const config: KbWorkflowConfig = { models: { qa: "provider/qa-model" } };
-	assert.equal(resolveAgentModel("qa", config, "session/model"), "provider/qa-model");
-	assert.equal(resolveAgentModel("qa", {}, "session/model"), "session/model");
-	assert.equal(resolveAgentModel("qa", { models: { planner: "p/m" } }), undefined);
+test("kb-agents config parses model and thinking-level for all four roles including qa", () => {
+	const parsed = parseKbAgents({
+		"kb-agents": {
+			planner: { model: "anthropic/claude-sonnet-4-5", "thinking-level": "high" },
+			developer: { model: "anthropic/claude-haiku-4-5", "thinking-level": "medium" },
+			reviewer: { model: "anthropic/claude-sonnet-4-5", "thinking-level": "low" },
+			qa: { model: "anthropic/claude-sonnet-4-5", "thinking-level": "low" },
+		},
+	});
+	for (const role of roles) {
+		assert.ok(parsed[role], `${role} must be present`);
+	}
+	assert.equal(parsed.qa?.model, "anthropic/claude-sonnet-4-5");
+	assert.equal(parsed.qa?.thinkingLevel, "low");
+	assert.equal(parsed.planner?.thinkingLevel, "high");
+	assert.equal(parsed.developer?.thinkingLevel, "medium");
+	assert.equal(parsed.reviewer?.thinkingLevel, "low");
+});
 
-	// qa is a first-class role alongside the others
+test("role object with only model or only thinking-level parses without error", () => {
+	const parsed = parseKbAgents({
+		"kb-agents": {
+			planner: { model: "p/m" },
+			developer: { "thinking-level": "max" },
+			reviewer: {},
+		},
+	});
+	assert.deepEqual(parsed.planner, { model: "p/m" });
+	assert.deepEqual(parsed.developer, { thinkingLevel: "max" });
+	assert.equal(parsed.reviewer, undefined);
+});
+
+test("old models-format config yields no kb-agents entries", () => {
+	const oldFormat = {
+		models: { planner: "anthropic/claude-sonnet-4-5", developer: "x/y", reviewer: "x/y", qa: "x/y" },
+	};
+	assert.deepEqual(parseKbAgents(oldFormat), {});
+	assert.deepEqual(parseKbAgents({ models: {} }), {});
+	// no kb-agents key at all
+	assert.deepEqual(parseKbAgents({}), {});
+});
+
+test("unknown thinking-level is dropped and treated as unset", () => {
+	assert.equal(parseThinkingLevel("ultra"), undefined);
+	assert.equal(parseThinkingLevel(42), undefined);
 	assert.deepEqual(
-		roles.filter((r) => r === "qa"),
-		["qa"],
+		parseKbAgents({ "kb-agents": { qa: { model: "q/m", "thinking-level": "ultra" } } }),
+		{ qa: { model: "q/m" } },
 	);
+	for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+		assert.equal(parseThinkingLevel(level), level);
+	}
+});
+
+test("malformed or non-object config never throws", () => {
+	for (const bad of [undefined, null, "nope", 42, [], { "kb-agents": "nope" }, { "kb-agents": [] }, { "kb-agents": { planner: "just-a-string" } }, { "kb-agents": { planner: { model: 5 } } }]) {
+		assert.doesNotThrow(() => parseKbAgents(bad));
+		assert.deepEqual(parseKbAgents(bad), {});
+	}
+});
+
+test("new-format config resolves model and thinking-level per role", () => {
+	const config: KbWorkflowConfig = {
+		kbAgents: parseKbAgents({
+			"kb-agents": {
+				developer: { model: "d/m", "thinking-level": "medium" },
+				qa: { model: "q/m" },
+			},
+		}),
+	};
+	assert.equal(resolveAgentModel("developer", config, "session/m"), "d/m");
+	assert.equal(resolveAgentModel("qa", config, "session/m"), "q/m");
+	assert.equal(resolveAgentModel("planner", config, "session/m"), "session/m");
+
+	// While the old models shape is still loaded by config-load.ts (until
+	// KB-5), resolveAgentModel keeps honoring it so the runtime keeps working.
+	assert.equal(resolveAgentModel("reviewer", { models: { reviewer: "old/m" } }, "s/m"), "old/m");
 });
