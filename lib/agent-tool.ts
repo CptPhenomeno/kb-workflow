@@ -7,7 +7,7 @@
  * `index.ts` so the behavior is unit-testable without a pi session.
  */
 
-import { resolveAgentConfig, type AgentRole, type KbWorkflowConfig, type SessionFallbacks } from "./config.ts";
+import { resolveAgentConfig, type AgentRole, type KbWorkflowConfig, type RoleConfig, type SessionFallbacks } from "./config.ts";
 import type { KbAgentName, SubagentResult, SubagentUsage } from "./subagent.ts";
 import { activeKickoffRunId } from "./kickoff-window.ts";
 import { itemFromTask, newRunId, recordRound } from "./round-ledger.ts";
@@ -85,6 +85,45 @@ export function kbAgentToolResult(res: SubagentResult): KbAgentToolResult {
 	};
 }
 
+/** The partial tool result streamed while the subagent runs (FR-23):
+ * `content` is the running line plus the subagent's text so far,
+ * `details` carries the resolved config so even the default rendering
+ * shows what the round runs with. */
+export interface KbAgentUpdate {
+	content: Array<{ type: "text"; text: string }>;
+	details: {
+		agent: KbAgentName;
+		running: boolean;
+		model?: string;
+		thinkingLevel?: string;
+	};
+}
+
+/**
+ * The running line of the streamed text (FR-23): `<agent> running ·
+ * <model> · thinking <level>`, the running call of the validated prototype
+ * (variant A). Missing resolved values are omitted rather than rendered
+ * as `undefined`.
+ */
+export function kbAgentRunningLine(agent: KbAgentName, resolved: RoleConfig): string {
+	const parts = [`${agent} running`];
+	if (resolved.model !== undefined) parts.push(resolved.model);
+	if (resolved.thinkingLevel !== undefined) parts.push(`thinking ${resolved.thinkingLevel}`);
+	return parts.join(" · ");
+}
+
+/**
+ * Build one streamed update (FR-23): the running line (resolved model and
+ * thinking level) followed by the subagent's text so far, and `details`
+ * carrying the same resolved values on every update — not only the first.
+ */
+export function kbAgentUpdate(agent: KbAgentName, resolved: RoleConfig, text: string): KbAgentUpdate {
+	return {
+		content: [{ type: "text", text: `${kbAgentRunningLine(agent, resolved)}\n${text}` }],
+		details: { agent, running: true, model: resolved.model, thinkingLevel: resolved.thinkingLevel },
+	};
+}
+
 /** Map a subagent name to its config role (`kb-developer` -> `developer`). */
 export const roleOf = (agent: KbAgentName): AgentRole => agent.replace("kb-", "") as AgentRole;
 
@@ -106,7 +145,8 @@ export interface KbAgentToolDeps {
 	/** The subagent runner seam (stands in for `runSubagent`). */
 	runSubagent: (opts: SubagentRunOptions) => Promise<SubagentResult>;
 	signal?: AbortSignal;
-	onUpdate?: (text: string) => void;
+	/** Receives every streamed update, already carrying the resolved config (FR-23). */
+	onUpdate?: (update: KbAgentUpdate) => void;
 	/** Ledger location (FR-27); when set, the invocation is persisted (FR-28). */
 	ledgerPath?: string;
 	/**
@@ -131,7 +171,10 @@ export async function executeKbAgent(deps: KbAgentToolDeps): Promise<SubagentRes
 		model: resolved.model,
 		thinkingLevel: resolved.thinkingLevel,
 		signal: deps.signal,
-		onUpdate: deps.onUpdate,
+		// FR-23: every streamed update carries the resolved model and thinking
+		// level — in the running line of the text and in `details` — so the
+		// default rendering shows them even without a custom renderer.
+		onUpdate: deps.onUpdate ? (t) => deps.onUpdate?.(kbAgentUpdate(deps.agent, resolved, t)) : undefined,
 	});
 	// FR-28: every kb_agent invocation is persisted to the usage ledger,
 	// successful or failed, best-effort (NFR-15): a ledger failure never

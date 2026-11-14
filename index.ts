@@ -233,7 +233,9 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 						...opts,
 						cwd: ctx.cwd,
 						signal,
-						onUpdate: (t) => onUpdate?.({ content: [{ type: "text", text: t }], details: { agent, running: true } }),
+						// FR-23: executeKbAgent streams updates that already carry the
+						// resolved model and thinking level in the text and in `details`.
+						onUpdate: (update) => onUpdate?.(update),
 					}),
 			});
 			// FR-31: the result carries the round's usage in pi's `Usage`

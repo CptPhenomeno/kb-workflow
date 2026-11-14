@@ -161,6 +161,121 @@ test("details still carry usage for the rendering", () => {
 	});
 });
 
+test("kb_agent tool streams resolved model and thinking level in the tool-call details", async () => {
+	// FR-23: while the subagent runs, every streamed update's `details`
+	// carries the resolved config — `{ agent, running, model, thinkingLevel }`
+	// — so even the default rendering shows what the round runs with.
+	const updates: Array<any> = [];
+	await executeKbAgent({
+		agent: "kb-developer",
+		task: "implement KB-48",
+		config: config({
+			kbAgents: {
+				developer: { model: "provider/dev", thinkingLevel: "high" },
+			},
+		}),
+		session: { model: "provider/session", thinkingLevel: "medium" },
+		onUpdate: (update) => updates.push(update),
+		runSubagent: async (opts) => {
+			opts.onUpdate?.("working…");
+			return result(opts.agent, opts);
+		},
+	});
+	assert.equal(updates.length, 1);
+	assert.deepEqual(updates[0].details, {
+		agent: "kb-developer",
+		running: true,
+		model: "provider/dev",
+		thinkingLevel: "high",
+	});
+});
+
+test("the onUpdate text carries the resolved model and thinking level of the running round", async () => {
+	// FR-23: the streamed text carries them too — the running line of the
+	// prototype's running call (variant A): `<agent> running · <model> ·
+	// thinking <level>`, followed by the streamed subagent text.
+	const texts: string[] = [];
+	await executeKbAgent({
+		agent: "kb-developer",
+		task: "implement KB-48",
+		config: config({
+			kbAgents: {
+				developer: { model: "provider/dev", thinkingLevel: "high" },
+			},
+		}),
+		session: { model: "provider/session", thinkingLevel: "medium" },
+		onUpdate: (update) => texts.push(update.content[0].text),
+		runSubagent: async (opts) => {
+			opts.onUpdate?.("working…");
+			return result(opts.agent, opts);
+		},
+	});
+	assert.equal(texts.length, 1);
+	assert.match(texts[0], /^kb-developer running · provider\/dev · thinking high\nworking…$/);
+});
+
+test("details carry model and thinkingLevel on every update, not only the first", async () => {
+	// FR-23: "every onUpdate" — the resolved config rides on each partial
+	// result, so a rendering rebuilt from any update shows it.
+	const updates: Array<any> = [];
+	await executeKbAgent({
+		agent: "kb-reviewer",
+		task: "review KB-48",
+		config: config({
+			kbAgents: {
+				reviewer: { model: "provider/rev", thinkingLevel: "low" },
+			},
+		}),
+		session: { model: "provider/session", thinkingLevel: "medium" },
+		onUpdate: (update) => updates.push(update),
+		runSubagent: async (opts) => {
+			opts.onUpdate?.("first");
+			opts.onUpdate?.("second");
+			opts.onUpdate?.("third");
+			return result(opts.agent, opts);
+		},
+	});
+	assert.equal(updates.length, 3);
+	for (const update of updates) {
+		assert.deepEqual(update.details, {
+			agent: "kb-reviewer",
+			running: true,
+			model: "provider/rev",
+			thinkingLevel: "low",
+		});
+	}
+});
+
+test("a role absent from the config streams the session model and thinking level", async () => {
+	// FR-20/FR-23: the streamed values are the resolved ones — a role with
+	// no config entry falls back to the dispatching session's model and
+	// thinking level, never to a raw (undefined) config entry.
+	const updates: Array<any> = [];
+	await executeKbAgent({
+		agent: "kb-qa",
+		task: "qa KB-47",
+		config: config({
+			kbAgents: {
+				developer: { model: "provider/dev", thinkingLevel: "high" },
+			},
+		}),
+		session: { model: "provider/session", thinkingLevel: "medium" },
+		onUpdate: (update) => updates.push(update),
+		runSubagent: async (opts) => {
+			opts.onUpdate?.("working…");
+			return result(opts.agent, opts);
+		},
+	});
+	assert.equal(updates.length, 1);
+	assert.deepEqual(updates[0].details, {
+		agent: "kb-qa",
+		running: true,
+		model: "provider/session",
+		thinkingLevel: "medium",
+	});
+	assert.match(updates[0].content[0].text, /^kb-qa running · provider\/session · thinking medium/);
+});
+
 test("kb_agent tool forwards the resolved model and thinking level", async () => {
 	// Unset properties fall back independently to the session's values.
 	const seen: Array<{ model?: string; thinkingLevel?: string }> = [];
