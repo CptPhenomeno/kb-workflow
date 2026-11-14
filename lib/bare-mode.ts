@@ -35,6 +35,10 @@ export interface AgentRoundResult {
 	output: string;
 	stderr: string;
 	errorMessage?: string;
+	/** The resolved model the round ran with (FR-25), `"unknown"` when nothing resolved. */
+	model?: string;
+	/** The resolved thinking level the round ran with (FR-25), `"unknown"` when nothing resolved. */
+	thinkingLevel?: string;
 	/** The round's token/euro usage (FR-27), persisted to the ledger (FR-28). */
 	usage?: SubagentUsage;
 }
@@ -72,8 +76,18 @@ const lastLine = (s: string): string => {
 	return lines.length ? lines[lines.length - 1] : "(no output)";
 };
 
+/**
+ * The muted `[model · thinking high]` suffix of every report round line
+ * (FR-25 / AC-32, the faithful visual reference is the round lines of
+ * prototype/kb-tui-prototype.mjs). Failed rounds list the config they ran
+ * with too; a property that resolved to nothing reads "unknown", the same
+ * semantics as the ledger record (FR-27).
+ */
+const roundConfigSuffix = (r: AgentRoundResult): string =>
+	` [${r.model ?? "unknown"} · thinking ${r.thinkingLevel ?? "unknown"}]`;
+
 const reportRound = (report: string[], kind: string, item: KbItem, r: AgentRoundResult) => {
-	report.push(`- ${kind} ${item.id} "${item.title}": ${r.ok ? "ok" : "FAILED"} — ${lastLine(r.output)}`);
+	report.push(`- ${kind} ${item.id} "${item.title}": ${r.ok ? "ok" : "FAILED"} — ${lastLine(r.output)}${roundConfigSuffix(r)}`);
 	if (!r.ok) report.push(`  error: ${r.errorMessage ?? ""} ${r.stderr.trim().slice(0, 300)}`);
 };
 
@@ -247,7 +261,7 @@ async function runTaskCycle(
 		const dev = round.result;
 		devOk = dev.ok;
 		report.push(
-			`- dev ${task.id} "${task.title}" (try ${attempt}, branch ${round.branch}): ${dev.ok ? "ok" : "FAILED"} — ${lastLine(dev.output)}`,
+			`- dev ${task.id} "${task.title}" (try ${attempt}, branch ${round.branch}): ${dev.ok ? "ok" : "FAILED"} — ${lastLine(dev.output)}${roundConfigSuffix(dev)}`,
 		);
 		if (!dev.ok) report.push(`  error: ${dev.errorMessage ?? ""} ${dev.stderr.trim().slice(0, 300)}`);
 	}

@@ -95,8 +95,20 @@ export async function dispatchDev(deps: DispatchDeps): Promise<{ report: string;
 		resolved: { model?: string; thinkingLevel?: string },
 	): Promise<AgentRoundResult> => {
 		const result = await deps.runSubagent({ agent, task, model: resolved.model, thinkingLevel: resolved.thinkingLevel });
-		recordRound(ledgerPath, { runId, agent, item, resolved, result });
-		return result;
+		// FR-25: the round result carries the resolved model, thinking level
+		// and usage of the round, from the same resolution that built the
+		// spawn args above — so every reportRound line can name them (AC-32)
+		// and the usage reaches the ledger (FR-28). `usage` rides along from
+		// the subagent runner's SubagentResult; a property that resolved to
+		// nothing stays undefined and reads "unknown" in the report.
+		const round: AgentRoundResult = {
+			...result,
+			model: resolved.model,
+			thinkingLevel: resolved.thinkingLevel,
+			usage: result.usage,
+		};
+		recordRound(ledgerPath, { runId, agent, item, resolved, result: round });
+		return round;
 	};
 
 	// Resolve the parent story of a task for its dev prompt (best effort).

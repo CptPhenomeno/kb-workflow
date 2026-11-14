@@ -1093,3 +1093,53 @@ test("qa role round forwards its configured model and thinking-level", async (t)
 
 	assert.deepEqual(seen, [{ model: "provider/qa", thinkingLevel: "xhigh" }]);
 });
+
+// KB-50 (FR-25 / AC-32): the round result the dispatch seams hand to the
+// mode runners carries the resolved model, thinkingLevel and usage of the
+// round; every report round line lists the model and thinking level.
+test("AgentRoundResult carries model, thinkingLevel and usage for dev, reviewer and qa rounds", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const story = item("KB-8", "story", "doing", "KB-1");
+	const epic = item("KB-1", "epic", "doing", null);
+	const task = item("KB-13", "task", "todo", "KB-8");
+	// The story flips to review when the task queue empties, so the qa
+	// round fires right after the task's review (FR-13).
+	const script = storyLoopScript({ story, epic, tasks: [task], storyReview: true });
+
+	const usage = { input: 10, output: 5, cacheRead: 1, cacheWrite: 2, cost: 0.25, turns: 1 };
+	const result = await runBareDev({
+		cwd: dir,
+		kb: fakeKb(script),
+		spawnDev: async () => ({
+			ok: true, output: "implemented KB-13", stderr: "",
+			model: "provider/dev", thinkingLevel: "high", usage,
+		}),
+		spawnReviewer: async () => ({
+			ok: true, output: "reviewed KB-13", stderr: "",
+			model: "provider/rev", thinkingLevel: "low", usage,
+		}),
+		spawnQa: async () => ({
+			ok: true, output: "qa KB-8 OK", stderr: "",
+			model: "provider/qa", thinkingLevel: "medium", usage,
+		}),
+	});
+
+	// Each round line lists the model and thinking level the round ran
+	// with, read off the AgentRoundResult (dev, reviewer and qa alike).
+	assert.ok(
+		result.report.includes(
+			'- dev KB-13 "item KB-13" (try 1, branch feature/KB-13): ok — implemented KB-13 [provider/dev · thinking high]',
+		),
+		result.report,
+	);
+	assert.ok(
+		result.report.includes('- review KB-13 "item KB-13": ok — reviewed KB-13 [provider/rev · thinking low]'),
+		result.report,
+	);
+	assert.ok(
+		result.report.includes('- qa review KB-8 "item KB-8": ok — qa KB-8 OK [provider/qa · thinking medium]'),
+		result.report,
+	);
+});

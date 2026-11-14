@@ -321,3 +321,138 @@ test("the usage block counts only the records of this run", async (t) => {
 	assert.ok(!result.report.includes("98.76"), result.report);
 	assert.ok(!result.report.includes("900k"), result.report);
 });
+
+// ---------------------------------------------------------------------------
+// KB-50 (FR-25 / AC-32): the round results the dispatch seam hands to the
+// mode runners carry the resolved model, thinking level and usage of the
+// round, so every round line of the /kb-dev report lists the model and
+// thinking level it ran with — bare mode (dev, review, qa) and the swept
+// review/qa rounds of message mode alike.
+// ---------------------------------------------------------------------------
+
+const roundConfig = {
+	kbAgents: {
+		developer: { model: "provider/dev", thinkingLevel: "high" as const },
+		reviewer: { model: "provider/rev", thinkingLevel: "low" as const },
+		qa: { model: "provider/qa", thinkingLevel: "medium" as const },
+	},
+};
+
+function roundItem(id: string, type: "task" | "story" | "epic", status: string, parent: string | null, title: string) {
+	return {
+		id, ref: null, type, title, description: "",
+		parent, status, priority: "medium" as const, points: null,
+		spec: null, labels: [], links: [], acceptance: [], tests: [], tdd_phase: null,
+		position: 1,
+	};
+}
+
+test("/kb-dev report lists model and thinking level per round", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	// Bare mode: one task cycle (dev + review) whose completion puts the
+	// parent story in review, so the qa round fires too (FR-13).
+	const task = roundItem("KB-42", "task", "todo", "KB-41", "task");
+	const story = roundItem("KB-41", "story", "review", "KB-1", "story");
+	const epic = roundItem("KB-1", "epic", "doing", null, "epic");
+	const byId = new Map([
+		[task.id, task],
+		[story.id, story],
+		[epic.id, epic],
+	]);
+	const kbRun = (json: unknown, code = 0) => ({ code, stdout: JSON.stringify(json), stderr: "", json });
+
+	const result = await dispatchDev(dispatchTestDeps({
+		args: "",
+		cwd: dir,
+		config: roundConfig,
+		kb: async (args) => {
+			if (args[0] === "list") return kbRun([]);
+			if (args[0] === "next") {
+				// No epic, no story: the FR-11 chain falls through to the task.
+				if (args.includes("--type")) return kbRun({ error: "none" }, 2);
+				return kbRun(task);
+			}
+			return kbRun(byId.get(args[1]) ?? null);
+		},
+		runSubagent: async () => ({ ok: true, output: "ok", stderr: "" }),
+	}));
+
+	// Every round line lists the model and thinking level the round ran
+	// with, resolved per role (FR-20) — dev, reviewer and qa alike (AC-32).
+	assert.ok(
+		result.report.includes("- dev KB-42 \"task\" (try 1, branch feature/KB-42): ok — ok [provider/dev · thinking high]"),
+		result.report,
+	);
+	assert.ok(result.report.includes("- review KB-42 \"task\": ok — ok [provider/rev · thinking low]"), result.report);
+	assert.ok(result.report.includes("- qa review KB-41 \"story\": ok — ok [provider/qa · thinking medium]"), result.report);
+
+	// Message mode: the swept pending review rounds list their config too
+	// (AC-32 holds for message mode) — a task goes to kb-reviewer, a story
+	// to kb-qa (FR-12).
+	t.after(() => closeKickoffWindow());
+	const pendingTask = roundItem("KB-7", "task", "review", null, "pending task");
+	const pendingStory = roundItem("KB-8", "story", "review", "KB-1", "pending story");
+	const message = await dispatchDev(dispatchTestDeps({
+		args: "fix the broken tests",
+		cwd: dir,
+		config: roundConfig,
+		kb: async (args) => {
+			if (args[0] === "list") return kbRun([pendingTask, pendingStory]);
+			return kbRun(null);
+		},
+		sendUserMessage: async () => {},
+	}));
+	assert.ok(message.report.includes("- review KB-7 \"pending task\": ok — ok [provider/rev · thinking low]"), message.report);
+	assert.ok(message.report.includes("- qa review KB-8 \"pending story\": ok — ok [provider/qa · thinking medium]"), message.report);
+});
+
+test("a failed round still reports the model and thinking level it ran with", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	const task = roundItem("KB-42", "task", "todo", null, "task");
+	const kbRun = (json: unknown, code = 0) => ({ code, stdout: JSON.stringify(json), stderr: "", json });
+	const kb = async (args: string[]) => {
+		if (args[0] === "list") return kbRun([]);
+		if (args[0] === "next") {
+			if (args.includes("--type")) return kbRun({ error: "none" }, 2);
+			return kbRun(task);
+		}
+		return kbRun(task);
+	};
+
+	// The developer round fails both tries: both FAILED dev lines still
+	// name the model and thinking level the round ran with.
+	const devFail = await dispatchDev(dispatchTestDeps({
+		args: "",
+		cwd: dir,
+		config: roundConfig,
+		kb,
+		runSubagent: async (opts) =>
+			opts.agent === "kb-developer"
+				? { ok: false, output: "boom", stderr: "err", errorMessage: "exploded" }
+				: { ok: true, output: "ok", stderr: "" },
+	}));
+	assert.ok(
+		devFail.report.includes("- dev KB-42 \"task\" (try 1, branch feature/KB-42): FAILED — boom [provider/dev · thinking high]"),
+		devFail.report,
+	);
+	assert.ok(
+		devFail.report.includes("- dev KB-42 \"task\" (try 2, branch feature/KB-42): FAILED — boom [provider/dev · thinking high]"),
+		devFail.report,
+	);
+
+	// A failed review round lists its config too.
+	const revFail = await dispatchDev(dispatchTestDeps({
+		args: "",
+		cwd: dir,
+		config: roundConfig,
+		kb,
+		runSubagent: async (opts) =>
+			opts.agent === "kb-reviewer"
+				? { ok: false, output: "bad", stderr: "err", errorMessage: "rejected" }
+				: { ok: true, output: "ok", stderr: "" },
+	}));
+	assert.ok(revFail.report.includes("- review KB-42 \"task\": FAILED — bad [provider/rev · thinking low]"), revFail.report);
+});
