@@ -5,12 +5,8 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import { appendRecord, type UsageRecord } from "./usage-ledger.ts";
-import {
-	renderCostReport,
-	renderRunUsageBlock,
-	runCostCommand,
-	type SentCustomMessage,
-} from "./cost-report.ts";
+import { renderCostReport, renderRunUsageBlock, runCostCommand } from "./cost-report.ts";
+import { USAGE_ENTRY_TYPE, type UsageEntryData } from "./usage-entry.ts";
 
 function sampleRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
 	return {
@@ -60,9 +56,13 @@ function tempCwd(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "kb-cost-test-"));
 }
 
-function captureMessages(): { sent: SentCustomMessage[]; send: (m: SentCustomMessage) => void } {
-	const sent: SentCustomMessage[] = [];
-	return { sent, send: (m) => void sent.push(m) };
+/** Captures appendEntry calls: (customType, data) pairs. */
+function captureEntries(): {
+	appended: { customType: string; data?: unknown }[];
+	appendEntry: (customType: string, data?: unknown) => void;
+} {
+	const appended: { customType: string; data?: unknown }[] = [];
+	return { appended, appendEntry: (customType, data) => void appended.push({ customType, data }) };
 }
 
 test("cumulative totals are readable with one command across runs", () => {
@@ -81,10 +81,10 @@ test("cumulative totals are readable with one command across runs", () => {
 	for (const record of twoRunRecords()) {
 		appendRecord(ledger, record);
 	}
-	const { sent, send } = captureMessages();
-	runCostCommand({ cwd, sendMessage: send });
-	assert.equal(sent.length, 1);
-	assert.ok(sent[0].content.includes("**€2.10**"), sent[0].content);
+	const { appended, appendEntry } = captureEntries();
+	runCostCommand({ cwd, appendEntry });
+	assert.equal(appended.length, 1);
+	assert.ok((appended[0].data as UsageEntryData).markdown.includes("**€2.10**"));
 });
 
 test("/kb-cost renders a GFM table with one row per role and a bold totals row", () => {
@@ -113,11 +113,11 @@ test("/kb-cost renders a GFM table with one row per role and a bold totals row",
 test("/kb-cost on an empty or missing ledger renders zeros instead of failing", () => {
 	// Missing ledger: no .pi directory at all.
 	const cwd = tempCwd();
-	const { sent, send } = captureMessages();
-	assert.doesNotThrow(() => runCostCommand({ cwd, sendMessage: send }));
-	assert.equal(sent.length, 1);
-	assert.ok(sent[0].content.includes("**kb-cost — cumulative across 0 runs**"), sent[0].content);
-	assert.ok(sent[0].content.includes("| **total** | | **0/0 (0/0)** | **€0.00** |"), sent[0].content);
+	const { appended, appendEntry } = captureEntries();
+	assert.doesNotThrow(() => runCostCommand({ cwd, appendEntry }));
+	assert.equal(appended.length, 1);
+	assert.ok((appended[0].data as UsageEntryData).markdown.includes("**kb-cost — cumulative across 0 runs**"));
+	assert.ok((appended[0].data as UsageEntryData).markdown.includes("| **total** | | **0/0 (0/0)** | **€0.00** |"));
 
 	// Empty record list renders the same zeroed table.
 	const md = renderCostReport([]);
@@ -169,19 +169,18 @@ test("the run usage block renders zeros when the run recorded no rounds", () => 
 	assert.ok(!block.includes("—"), block);
 });
 
-test("the command output is markdown rendered inside a custom-message block", () => {
+test("the command output is markdown delivered as a custom entry on the dedicated type", () => {
 	const cwd = tempCwd();
 	appendRecord(path.join(cwd, ".pi", "kb-usage.jsonl"), sampleRecord());
-	const { sent, send } = captureMessages();
-	runCostCommand({ cwd, sendMessage: send });
+	const { appended, appendEntry } = captureEntries();
+	runCostCommand({ cwd, appendEntry });
 
-	assert.equal(sent.length, 1);
-	const message = sent[0];
-	// The custom-message block the TUI renders with the Markdown component.
-	assert.equal(message.customType, "kb-workflow");
-	assert.equal(message.display, true);
-	// The content is markdown: bold header and a GFM table.
-	assert.ok(message.content.startsWith("**kb-cost — cumulative across 1 runs**"), message.content);
-	assert.ok(message.content.includes("| role | model | tokens in/out (cache r/w) | cost |"), message.content);
-	assert.ok(message.content.includes("|---|---|---|---|"), message.content);
+	assert.equal(appended.length, 1);
+	// The dedicated custom-entry type of the TUI-only channel (FR-30).
+	assert.equal(appended[0].customType, USAGE_ENTRY_TYPE);
+	// The payload is markdown: bold header and a GFM table.
+	const data = appended[0].data as UsageEntryData;
+	assert.ok(data.markdown.startsWith("**kb-cost — cumulative across 1 runs**"), data.markdown);
+	assert.ok(data.markdown.includes("| role | model | tokens in/out (cache r/w) | cost |"), data.markdown);
+	assert.ok(data.markdown.includes("|---|---|---|---|"), data.markdown);
 });

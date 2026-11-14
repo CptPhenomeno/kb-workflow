@@ -15,7 +15,10 @@
  *                    identifies and works the pertinent items in DAG order.
  *   /kb-cost         Prints the cumulative token and euro spend across all runs
  *                    from the usage ledger, per role and per model, as a
- *                    markdown table (an empty ledger prints zeros).
+ *                    markdown table (an empty ledger prints zeros). Delivered
+ *                    TUI-only (appendEntry + entry renderer): the table never
+ *                    enters the LLM context, so the command works while the
+ *                    agent is busy.
  *
  * Tools (callable by the LLM):
  *   ask_user         Ask the user a question (input / select / multi-select).
@@ -49,6 +52,7 @@ import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { executeKbAgent, kbAgentToolResult } from "./lib/agent-tool.ts";
 import { runCostCommand } from "./lib/cost-report.ts";
+import { registerUsageEntryRenderer } from "./lib/usage-entry-renderer.ts";
 import { loadKbWorkflowConfig } from "./lib/config-load.ts";
 import { kbErrorMessage, runKb } from "./lib/kb.ts";
 import { preFlightCheck } from "./lib/git.ts";
@@ -89,6 +93,14 @@ Finally, report to the user: the plan structure (epics/stories/tasks) and the im
 }
 
 export default function kbWorkflow(pi: ExtensionAPI) {
+	// ---------------------------------------------------------------------------
+	// TUI-only usage channel (FR-30 / AC-39): register the shared entry
+	// renderer for `kb-usage` custom entries. Custom entries never enter the
+	// LLM context, so the usage reports (/kb-cost, and the FR-29 message-mode
+	// "Usage this run" block) are displayed but never billed to the model.
+	// ---------------------------------------------------------------------------
+	registerUsageEntryRenderer(pi);
+
 	// ---------------------------------------------------------------------------
 	// Tool: ask_user — ask the user a question through the TUI dialogs.
 	// ---------------------------------------------------------------------------
@@ -327,15 +339,18 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 
 	// ---------------------------------------------------------------------------
 	// Command: /kb-cost — cumulative token/euro totals as a markdown table
-	// (FR-30 / AC-36).
+	// (FR-30 / AC-36 / AC-39).
 	// ---------------------------------------------------------------------------
 	pi.registerCommand("kb-cost", {
 		description:
 			"Print the cumulative token and euro spend across all runs from the usage ledger, broken down per role and per model, as a markdown table (an empty ledger prints zeros)",
 		handler: async (_args, ctx) => {
-			// Reads the ledger and renders it as markdown in a custom-message
-			// block; a missing or unreadable ledger degrades to zeros (NFR-15).
-			runCostCommand({ cwd: ctx.cwd, sendMessage: (message) => pi.sendMessage(message) });
+			// TUI-only delivery (FR-30 / AC-39): the table is a custom entry
+			// rendered by the shared entry renderer — it never enters the LLM
+			// context, so no isIdle guard is needed and the command is usable
+			// while the agent is busy. A missing or unreadable ledger degrades
+			// to zeros (NFR-15).
+			runCostCommand({ cwd: ctx.cwd, appendEntry: (customType, data) => pi.appendEntry(customType, data) });
 		},
 	});
 }

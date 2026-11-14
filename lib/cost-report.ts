@@ -3,10 +3,13 @@
  * the token/euro spend — the cumulative /kb-cost table across all runs and
  * the "Usage this run" block appended to the /kb-dev report.
  *
- * The /kb-cost output is delivered through a custom-message block
- * (`customType: "kb-workflow"`, `display: true`): pi's TUI renders custom
- * messages with the real Markdown component inside a customMessageBg block,
- * GFM tables included. The table layout reproduces the validated prototype
+ * The /kb-cost output is delivered through the TUI-only entry channel
+ * (FR-30, amended 2026-11-14): `pi.appendEntry` on the dedicated `kb-usage`
+ * type plus the shared entry renderer (lib/usage-entry-renderer.ts), which
+ * renders the markdown with the real Markdown component inside a
+ * customMessageBg block, GFM tables included. Custom entries do NOT
+ * participate in LLM context, so the table never reaches the model. The
+ * table layout reproduces the validated prototype
  * (prototype/kb-tui-prototype.mjs, key `c`, table layout) faithfully.
  *
  * Pure Node builtins, no pi imports (NFR-17): the command reads the ledger
@@ -15,6 +18,8 @@
  * zeros, never an error (NFR-15).
  */
 
+import { ledgerPathFor } from "./round-ledger.ts";
+import { appendUsageEntry, type AppendEntry } from "./usage-entry.ts";
 import {
 	aggregateByRole,
 	readRecords,
@@ -22,21 +27,13 @@ import {
 	type UsageRecord,
 	type UsageTotals,
 } from "./usage-ledger.ts";
-import { ledgerPathFor } from "./round-ledger.ts";
-
-/** The custom message the command sends; pi renders it as markdown. */
-export interface SentCustomMessage {
-	customType: "kb-workflow";
-	content: string;
-	display: boolean;
-}
 
 /** Dependencies of the command, injectable for tests. */
 export interface CostCommandDeps {
 	/** The project root; the ledger sits in `<cwd>/.pi/kb-usage.jsonl`. */
 	cwd: string;
-	/** The extension's `pi.sendMessage` seam. */
-	sendMessage: (message: SentCustomMessage) => void;
+	/** The extension's `pi.appendEntry` seam (the TUI-only channel). */
+	appendEntry: AppendEntry;
 }
 
 /** One table row: the (role, model) pair with its aggregated totals. */
@@ -159,14 +156,11 @@ export function renderRunUsageBlock(records: readonly UsageRecord[]): string {
 /**
  * The /kb-cost command: read the ledger (a missing or unreadable one
  * degrades to an empty record set, NFR-15) and render the cumulative totals
- * as markdown in a custom-message block.
+ * as markdown through the TUI-only entry channel — a custom entry that
+ * never enters the LLM context, so no isIdle guard is needed.
  */
 export function runCostCommand(deps: CostCommandDeps): void {
 	const ledgerPath = ledgerPathFor(deps.cwd);
 	const records = readRecords(ledgerPath);
-	deps.sendMessage({
-		customType: "kb-workflow",
-		content: renderCostReport(records),
-		display: true,
-	});
+	appendUsageEntry(deps.appendEntry, renderCostReport(records));
 }
