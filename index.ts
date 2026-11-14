@@ -13,6 +13,9 @@
  *                    per invocation; or, with a message argument,
  *                    delivers the message to the main agent as a kickoff that
  *                    identifies and works the pertinent items in DAG order.
+ *   /kb-cost         Prints the cumulative token and euro spend across all runs
+ *                    from the usage ledger, per role and per model, as a
+ *                    markdown table (an empty ledger prints zeros).
  *
  * Tools (callable by the LLM):
  *   ask_user         Ask the user a question (input / select / multi-select).
@@ -45,6 +48,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { executeKbAgent } from "./lib/agent-tool.ts";
+import { runCostCommand } from "./lib/cost-report.ts";
 import { loadKbWorkflowConfig } from "./lib/config-load.ts";
 import { kbErrorMessage, runKb } from "./lib/kb.ts";
 import { preFlightCheck } from "./lib/git.ts";
@@ -319,6 +323,20 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 			"info",
 		);
 		pi.sendMessage({ customType: "kb-workflow", content: report, display: true });
+		},
+	});
+
+	// ---------------------------------------------------------------------------
+	// Command: /kb-cost — cumulative token/euro totals as a markdown table
+	// (FR-30 / AC-36).
+	// ---------------------------------------------------------------------------
+	pi.registerCommand("kb-cost", {
+		description:
+			"Print the cumulative token and euro spend across all runs from the usage ledger, broken down per role and per model, as a markdown table (an empty ledger prints zeros)",
+		handler: async (_args, ctx) => {
+			// Reads the ledger and renders it as markdown in a custom-message
+			// block; a missing or unreadable ledger degrades to zeros (NFR-15).
+			runCostCommand({ cwd: ctx.cwd, sendMessage: (message) => pi.sendMessage(message) });
 		},
 	});
 }
