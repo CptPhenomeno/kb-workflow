@@ -258,5 +258,7 @@ test("a ledger write failure does not fail the round or the /kb-dev run", async 
 		ledgerPath: brokenLedger,
 		runSubagent: async (opts) => toolResult(opts.agent),
 	});
-	assert.equal(res.ok, true, "the kb_agent round is unaffected by the ledger failure");
+	// executeKbAgent returns the round's result plus the resolved config and
+	// streamed lines (FR-24); the ledger failure still never fails the round.
+	assert.equal(res.result.ok, true, "the kb_agent round is unaffected by the ledger failure");
 });

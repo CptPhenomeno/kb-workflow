@@ -51,6 +51,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { executeKbAgent, kbAgentToolResult } from "./lib/agent-tool.ts";
+import { kbAgentRenderCall, kbAgentRenderResult } from "./lib/agent-tool-renderer.ts";
 import { runCostCommand } from "./lib/cost-report.ts";
 import { settleKickoffWindow } from "./lib/kickoff-window.ts";
 import { registerUsageEntryRenderer } from "./lib/usage-entry-renderer.ts";
@@ -218,7 +219,7 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 				thinkingLevel: ctx.thinkingLevel,
 			};
-			const res = await executeKbAgent({
+			const { result: res, resolved, lines } = await executeKbAgent({
 				agent,
 				task: params.task,
 				config,
@@ -242,8 +243,19 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 			// shape on the field pi accounts a tool's spend from, so pi
 			// persists it and includes it in the session totals (footer,
 			// /session, RPC); `details.usage` keeps feeding the rendering.
-			return kbAgentToolResult(res);
+			// FR-24: the resolved config and the streamed lines ride along in
+			// `details` so the custom rendering (and a reload) can draw the
+			// variant A title line and result.
+			return kbAgentToolResult(res, { resolved, lines });
 		},
+		// FR-24 / AC-31: the custom rendering of the validated prototype's
+		// variant A — the resolved model and thinking level inline on the
+		// tool-call title line, the last streamed line while running, and
+		// the `✓ completed` line plus the usage line when finished. The
+		// state-tinted Box around the renderers is pi's own
+		// ToolExecutionComponent; the renderers draw no framing themselves.
+		renderCall: kbAgentRenderCall,
+		renderResult: kbAgentRenderResult,
 	});
 
 	// ---------------------------------------------------------------------------

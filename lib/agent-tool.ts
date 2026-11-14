@@ -61,9 +61,22 @@ export interface KbAgentToolResult {
 		exitCode: number | null;
 		/** The internal flat usage, kept for the rendering (turns included). */
 		usage: SubagentUsage;
+		/** The resolved model of the round, for the custom rendering (FR-24). */
+		model?: string;
+		/** The resolved thinking level of the round, for the custom rendering (FR-24). */
+		thinkingLevel?: string;
+		/** Every streamed assistant text of the round, in order (FR-24). */
+		lines?: string[];
 	};
 	/** The round's usage in pi's `Usage` shape, so pi counts the subagent spend. */
 	usage: PiUsage;
+}
+
+/** The round info the final tool result carries for the rendering (FR-24):
+ * the resolved config and the streamed lines of the round. */
+export interface KbAgentRoundInfo {
+	resolved?: RoleConfig;
+	lines?: string[];
 }
 
 /**
@@ -73,14 +86,23 @@ export interface KbAgentToolResult {
  * spend from, so the footer, `/session` and RPC session totals include the
  * subagent spend.
  */
-export function kbAgentToolResult(res: SubagentResult): KbAgentToolResult {
+export function kbAgentToolResult(res: SubagentResult, round?: KbAgentRoundInfo): KbAgentToolResult {
 	const header = res.ok
 		? `Subagent ${res.agent} completed.`
 		: `Subagent ${res.agent} FAILED (exit ${res.exitCode}${res.errorMessage ? `: ${res.errorMessage}` : ""}).`;
 	const stderr = res.stderr.trim();
+	// FR-24: the final `details` carry the resolved config and the streamed
+	// lines so the custom rendering — and a reload, which replays no partial —
+	// can draw the variant A title line and result. The keys are added only
+	// when the round info provides them (an old caller without it keeps the
+	// FR-31 shape).
+	const details: KbAgentToolResult["details"] = { ok: res.ok, agent: res.agent, actor: res.actor, exitCode: res.exitCode, usage: res.usage };
+	if (round?.resolved?.model !== undefined) details.model = round.resolved.model;
+	if (round?.resolved?.thinkingLevel !== undefined) details.thinkingLevel = round.resolved.thinkingLevel;
+	if (round?.lines !== undefined) details.lines = round.lines;
 	return {
 		content: [{ type: "text", text: `${header}\n\n${res.output}${stderr ? `\n\nstderr:\n${stderr}` : ""}` }],
-		details: { ok: res.ok, agent: res.agent, actor: res.actor, exitCode: res.exitCode, usage: res.usage },
+		details,
 		usage: toPiUsage(res.usage),
 	};
 }
@@ -157,14 +179,27 @@ export interface KbAgentToolDeps {
 	runId?: string;
 }
 
+/** One kb_agent execution, with everything the final tool result's
+ * rendering needs (FR-24): the round's `SubagentResult`, the resolved
+ * config it ran with, and every streamed assistant text in order. */
+export interface KbAgentExecution {
+	result: SubagentResult;
+	resolved: RoleConfig;
+	lines: string[];
+}
+
 /**
  * Run one kb_agent tool invocation: resolve both properties for the role
  * and hand them, together with the agent name and task, to the runner.
- * The returned `SubagentResult` feeds `kbAgentToolResult` for the tool's
- * final result.
+ * The returned execution feeds `kbAgentToolResult` for the tool's final
+ * result: the `SubagentResult` plus the resolved config and the streamed
+ * lines of the round (FR-24).
  */
-export async function executeKbAgent(deps: KbAgentToolDeps): Promise<SubagentResult> {
+export async function executeKbAgent(deps: KbAgentToolDeps): Promise<KbAgentExecution> {
 	const resolved = resolveAgentConfig(roleOf(deps.agent), deps.config, deps.session);
+	// FR-24: every streamed assistant text of the round, in order — the
+	// lines the custom rendering shows (all expanded, last two collapsed).
+	const lines: string[] = [];
 	const result = await deps.runSubagent({
 		agent: deps.agent,
 		task: deps.task,
@@ -173,8 +208,13 @@ export async function executeKbAgent(deps: KbAgentToolDeps): Promise<SubagentRes
 		signal: deps.signal,
 		// FR-23: every streamed update carries the resolved model and thinking
 		// level — in the running line of the text and in `details` — so the
-		// default rendering shows them even without a custom renderer.
-		onUpdate: deps.onUpdate ? (t) => deps.onUpdate?.(kbAgentUpdate(deps.agent, resolved, t)) : undefined,
+		// default rendering shows them even without a custom renderer. The
+		// wrapper is always installed: it accumulates the streamed lines for
+		// the final result's rendering (FR-24) even without an onUpdate consumer.
+		onUpdate: (t) => {
+			lines.push(t);
+			deps.onUpdate?.(kbAgentUpdate(deps.agent, resolved, t));
+		},
 	});
 	// FR-28: every kb_agent invocation is persisted to the usage ledger,
 	// successful or failed, best-effort (NFR-15): a ledger failure never
@@ -192,5 +232,5 @@ export async function executeKbAgent(deps: KbAgentToolDeps): Promise<SubagentRes
 			result,
 		});
 	}
-	return result;
+	return { result, resolved, lines };
 }
