@@ -195,6 +195,9 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 				task: params.task,
 				config,
 				session,
+				// Every kb_agent invocation is persisted to the usage ledger
+				// (FR-28), best-effort: a ledger failure never fails the round.
+				ledgerPath: path.join(ctx.cwd, ".pi", "kb-usage.jsonl"),
 				runSubagent: (opts) =>
 					runSubagent({
 						...opts,

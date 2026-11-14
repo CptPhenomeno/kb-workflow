@@ -27,7 +27,7 @@ import { resolveAgentConfig, type KbWorkflowConfig, type RoleConfig, type Sessio
 import { runDeveloperRound } from "./orchestration.ts";
 import { kbErrorMessage, type KbItem, type KbRun } from "./kb.ts";
 import { roleOf } from "./agent-tool.ts";
-import type { KbAgentName } from "./subagent.ts";
+import type { KbAgentName, SubagentUsage } from "./subagent.ts";
 
 /** What a subagent round returns (the relevant slice of SubagentResult). */
 export interface AgentRoundResult {
@@ -35,6 +35,8 @@ export interface AgentRoundResult {
 	output: string;
 	stderr: string;
 	errorMessage?: string;
+	/** The round's token/euro usage (FR-27), persisted to the ledger (FR-28). */
+	usage?: SubagentUsage;
 }
 
 export interface BareModeDeps {

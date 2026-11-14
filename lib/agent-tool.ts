@@ -9,6 +9,7 @@
 
 import { resolveAgentConfig, type AgentRole, type KbWorkflowConfig, type SessionFallbacks } from "./config.ts";
 import type { KbAgentName, SubagentResult } from "./subagent.ts";
+import { itemFromTask, newRunId, recordRound } from "./round-ledger.ts";
 
 /** Map a subagent name to its config role (`kb-developer` -> `developer`). */
 export const roleOf = (agent: KbAgentName): AgentRole => agent.replace("kb-", "") as AgentRole;
@@ -32,6 +33,10 @@ export interface KbAgentToolDeps {
 	runSubagent: (opts: SubagentRunOptions) => Promise<SubagentResult>;
 	signal?: AbortSignal;
 	onUpdate?: (text: string) => void;
+	/** Ledger location (FR-27); when set, the invocation is persisted (FR-28). */
+	ledgerPath?: string;
+	/** Identifies this kb_agent invocation in the ledger (default: a fresh id). */
+	runId?: string;
 }
 
 /**
@@ -40,7 +45,7 @@ export interface KbAgentToolDeps {
  */
 export async function executeKbAgent(deps: KbAgentToolDeps): Promise<SubagentResult> {
 	const resolved = resolveAgentConfig(roleOf(deps.agent), deps.config, deps.session);
-	return deps.runSubagent({
+	const result = await deps.runSubagent({
 		agent: deps.agent,
 		task: deps.task,
 		model: resolved.model,
@@ -48,4 +53,18 @@ export async function executeKbAgent(deps: KbAgentToolDeps): Promise<SubagentRes
 		signal: deps.signal,
 		onUpdate: deps.onUpdate,
 	});
+	// FR-28: every kb_agent invocation is persisted to the usage ledger,
+	// successful or failed, best-effort (NFR-15): a ledger failure never
+	// fails the round. `item` is the kb item ID the task targets, null when
+	// it targets none; `runId` identifies this individual call.
+	if (deps.ledgerPath) {
+		recordRound(deps.ledgerPath, {
+			runId: deps.runId ?? newRunId("kb-agent"),
+			agent: deps.agent,
+			item: itemFromTask(deps.task),
+			resolved,
+			result,
+		});
+	}
+	return result;
 }

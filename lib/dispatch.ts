@@ -11,6 +11,11 @@
  * the next unit via the FR-11 chain (epic-scoped story -> board-wide story
  * -> single task/bug) and works one story per invocation; the message runner
  * builds the fixed kickoff template (FR-10).
+ *
+ * Every round spawned through this module — dev, reviewer and qa, bare and
+ * message mode alike — is also persisted to the usage ledger with one entry
+ * per round, successful or failed (FR-28), best-effort so a ledger failure
+ * never fails the round or the run (NFR-15).
  */
 
 import type { KbWorkflowConfig, SessionFallbacks } from "./config.ts";
@@ -19,6 +24,7 @@ import { runBareDev, type AgentRoundResult, type BareModeDeps } from "./bare-mod
 import { runMessageDev, type MessageModeDeps } from "./message-mode.ts";
 import { devTask, qaTask, reviewTask } from "./prompts.ts";
 import type { KbItem, KbRun } from "./kb.ts";
+import { ledgerPathFor, newRunId, recordRound } from "./round-ledger.ts";
 
 export type DevMode = { mode: "bare"; message: null } | { mode: "message"; message: string };
 
@@ -50,6 +56,10 @@ export interface DispatchDeps {
 	notify?: (message: string, level: "info" | "error") => void;
 	/** Optional UI status line updates. */
 	setStatus?: (status: string | undefined) => void;
+	/** Overrides the ledger location (defaults to `<cwd>/.pi/kb-usage.jsonl`, FR-27). */
+	ledgerPath?: string;
+	/** Overrides the run id identifying this invocation in the ledger (FR-27). */
+	runId?: string;
 }
 
 /**
@@ -61,15 +71,26 @@ export interface DispatchDeps {
 export async function dispatchDev(deps: DispatchDeps): Promise<{ report: string; delivered?: boolean }> {
 	const parsed = parseDevArgs(deps.args);
 
+	// One run id per /kb-dev invocation, one ledger location (FR-27): every
+	// round of this run — bare and message mode alike — is recorded under it.
+	const runId = deps.runId ?? newRunId("kb-dev");
+	const ledgerPath = deps.ledgerPath ?? ledgerPathFor(deps.cwd);
+
 	// Per-role resolution: the mode runners call resolveAgentConfig for each
 	// role (FR-20) and hand the resolved properties to these seams, which
-	// forward both of them to the subagent runner (FR-21).
-	const run = (
+	// forward both of them to the subagent runner (FR-21) and persist one
+	// ledger entry per round, successful or failed (FR-28, best-effort per
+	// NFR-15 — a ledger failure never fails the round or the run).
+	const run = async (
 		agent: SubagentRunOptions["agent"],
+		item: string | null,
 		task: string,
 		resolved: { model?: string; thinkingLevel?: string },
-	): Promise<AgentRoundResult> =>
-		deps.runSubagent({ agent, task, model: resolved.model, thinkingLevel: resolved.thinkingLevel });
+	): Promise<AgentRoundResult> => {
+		const result = await deps.runSubagent({ agent, task, model: resolved.model, thinkingLevel: resolved.thinkingLevel });
+		recordRound(ledgerPath, { runId, agent, item, resolved, result });
+		return result;
+	};
 
 	// Resolve the parent story of a task for its dev prompt (best effort).
 	const storyCache = new Map<string, KbItem | null>();
@@ -83,11 +104,11 @@ export async function dispatchDev(deps: DispatchDeps): Promise<{ report: string;
 	};
 
 	const spawnReviewer = (item: KbItem, resolved: { model?: string; thinkingLevel?: string }) =>
-		run("kb-reviewer", reviewTask(item), resolved);
+		run("kb-reviewer", item.id, reviewTask(item), resolved);
 	const spawnQa = (item: KbItem, resolved: { model?: string; thinkingLevel?: string }) =>
-		run("kb-qa", qaTask(item), resolved);
+		run("kb-qa", item.id, qaTask(item), resolved);
 	const spawnDev = async (task: KbItem, resolved: { model?: string; thinkingLevel?: string }) =>
-		run("kb-developer", devTask(task, await storyOf(task)), resolved);
+		run("kb-developer", task.id, devTask(task, await storyOf(task)), resolved);
 
 	if (parsed.mode === "message") {
 		const result = await runMessageDev({
