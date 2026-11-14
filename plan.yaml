@@ -445,6 +445,7 @@ items:
               - role with explicit model receives both --model <configured> and --thinking <session level>
               - absent role inherits the session model and thinking level
               - configured thinking-level is passed as --thinking without a --model
+              - neither property set passes neither flag
             blocks: [index-dispatch]
             acceptance:
               - AC-27 a role defining only model spawns with --model <configured> and --thinking <session level>
@@ -883,3 +884,141 @@ items:
               - details still carry usage for the rendering
             acceptance:
               - AC-37 the kb_agent tool result carries usage and pi's session totals include the subagent spend
+
+  # ------------------------------------- v0.2.1 review fixes (KB-52 findings)
+  - ref: ledger-review-fixes
+    type: story
+    title: Post-review fixes for the usage ledger (KB-52 review findings B/C/D/E)
+    description: |
+      The usage-ledger story (KB-52) is done and its code is merged on
+      develop (8e54279..3e11c4b), but its review found four defects that
+      contradict the amended SPEC v0.2.1: the ledger path is inlined in
+      index.ts instead of going through ledgerPathFor (finding B), records
+      store the kb claim actor in `agent` instead of the subagent name
+      (finding E, amended FR-27 / AC-40), /kb-cost delivers its table with
+      pi.sendMessage so it enters the LLM context instead of the TUI-only
+      channel (finding C, amended FR-30 / AC-39), and message mode has no
+      kickoff window, so the dev rounds the main agent spawns are never
+      attributed to the /kb-dev run and no "Usage this run" block is
+      emitted at settle (finding D, amended FR-29 / AC-38).
+      This story is bugfix-only: it repairs the merged FR-27..FR-31 code
+      and adds no feature. It is a standalone root story (not a child of
+      the v0.2.1 epic) that blocks the epic KB-46, so the version cannot
+      complete before the review findings are fixed. The ledger is still
+      empty in practice, so the record-shape fix needs no migration.
+      Done when AC-38, AC-39, AC-40 hold and the FR-27 ledger location has
+      a single source of truth.
+    priority: high
+    points: 5
+    blocks: [subagent-visibility-v021]
+    acceptance:
+      - AC-38 a kb_agent call made while a kickoff window is open is recorded with the kickoff's runId; the window closes at agent_settled, which emits the "Usage this run" block for its records (a window with no recorded rounds emits no block)
+      - AC-39 the /kb-cost table and the "Usage this run" blocks are delivered TUI-only (appendEntry + entry renderer) and never enter the LLM context; /kb-cost is usable while the agent is busy
+      - AC-40 ledger records carry agent = subagent name (kb-developer, …) and the claim actor is recomputable from agent + item; the record shape matches FR-27 exactly
+      - finding B the ledger location has a single source of truth — index.ts wires the ledger through ledgerPathFor(ctx.cwd), so the FR-27 path is defined once
+    children:
+      - ref: fixes-ledger-wiring-shape
+        type: task
+        title: Ledger wiring and record shape match the amended FR-27
+        description: |
+          The ledger location is defined twice — lib/round-ledger.ts exports
+          ledgerPathFor(cwd) while index.ts inlines
+          path.join(ctx.cwd, ".pi", "kb-usage.jsonl") for the kb_agent tool —
+          so a change to the FR-27 location would silently split the ledger
+          in two (finding B). Worse, roundRecord stores actorForAgent(agent)
+          plus `-<item>` in the record's `agent` field, so a record reads
+          `agent-dev-KB-53` instead of the subagent name the amended FR-27
+          requires, and the claim actor is persisted although it is
+          recomputable from `agent` + `item` (finding E / AC-40).
+          Wire index.ts through ledgerPathFor(ctx.cwd) (single source of
+          truth for the FR-27 location) and change roundRecord so `agent`
+          is the subagent name (`kb-planner` / `kb-developer` /
+          `kb-reviewer` / `kb-qa`) with no item suffix and no stored claim
+          actor; update the UsageRecord docstring in lib/usage-ledger.ts,
+          isUsageRecord and the tests that assert the old actor-shaped
+          value. The claim actor stays available through actorForAgent(agent)
+          plus `-<item>` when an item is present. No migration: the ledger
+          is still empty, and existing lines are never rewritten (FR-27
+          append-only).
+          Done when AC-40 holds and the FR-27 path is defined in one place.
+        priority: high
+        points: 3
+        tests:
+          - index.ts wires the kb_agent ledger through ledgerPathFor so the FR-27 location has one source of truth
+          - a ledger record's agent field is the subagent name with no item suffix
+          - the claim actor is not stored in the record and is recomputable from agent plus item
+          - isUsageRecord accepts a record whose agent is a subagent name
+          - no migration is needed because the ledger is empty and existing lines are never rewritten
+        blocks: [fixes-kickoff-window]
+        acceptance:
+          - AC-40 ledger records carry agent = subagent name (kb-developer, …) and the claim actor is recomputable from agent + item
+          - finding B index.ts wires the ledger through ledgerPathFor(ctx.cwd) instead of an inlined path
+      - ref: fixes-cost-tui-only
+        type: task
+        title: /kb-cost delivers its table through the TUI-only entry channel
+        description: |
+          /kb-cost currently sends its markdown table with pi.sendMessage
+          (customType "kb-workflow"), and custom messages participate in
+          LLM context — so every cost table is billed to the model and
+          pollutes the conversation, contradicting the amended FR-30 /
+          AC-39, which requires the TUI-only channel.
+          Deliver the table with pi.appendEntry plus a
+          pi.registerEntryRenderer for a dedicated custom type: custom
+          entries do not participate in LLM context, so the table never
+          reaches the model and the command needs no isIdle guard (usable
+          while the agent is busy). The entry renderer reproduces the
+          validated prototype look faithfully — the real Markdown
+          component inside a customMessageBg-styled block, GFM table with
+          one row per role and a bold totals row — using
+          prototype/kb-tui-prototype.mjs (gitignored, local; key `c`
+          toggles the table layout) as the visual reference. The same
+          renderer and channel are what the FR-29 message-mode "Usage this
+          run" block will use, so expose it as a shared helper instead of
+          inlining it in the command.
+          Done when AC-39 holds for /kb-cost and the renderer is reusable.
+        priority: high
+        points: 3
+        tests:
+          - /kb-cost delivers its table through appendEntry instead of sendMessage
+          - the registered entry renderer renders the markdown table inside a customMessageBg block with a GFM table and a bold totals row
+          - the /kb-cost entry never enters the LLM context and the command has no isIdle guard
+          - the entry renderer is shared so the message-mode usage block can reuse it
+          - /kb-cost on an empty or missing ledger still renders zeros through the entry channel
+        blocks: [fixes-kickoff-window]
+        acceptance:
+          - AC-39 the /kb-cost table is delivered TUI-only (appendEntry + entry renderer) and never enters the LLM context; /kb-cost is usable while the agent is busy
+      - ref: fixes-kickoff-window
+        type: task
+        title: Message-mode kickoff window attributes rounds to the run and emits the usage block at settle
+        description: |
+          In message mode the main agent spawns the dev rounds itself, and
+          each kb_agent call gets its own per-call runId, so the
+          /kb-dev run's records cannot be aggregated and no "Usage this
+          run" block ever appears — the amended FR-29 / AC-38 require a
+          kickoff window to close that gap.
+          When the kickoff is delivered, record the /kb-dev runId as the
+          active kickoff in extension memory; every kb_agent call made
+          while the window is open records with that runId (FR-27
+          inheritance). On pi.on("agent_settled") (ctx.isIdle() true),
+          emit the "Usage this run" block for the window's records —
+          sweep plus kickoff rounds alike — through the TUI-only
+          appendEntry/entry-renderer channel of the /kb-cost fix, then
+          close the window. A window that recorded no rounds emits no
+          block. The report printed at kickoff delivery states that the
+          usage follows at the end of the kickoff run. Edge cases: an
+          extension reload loses the in-memory window, so rounds fall back
+          to per-call ids and no block is emitted (acceptable
+          degradation); /kb-dev requires an idle agent, so windows never
+          overlap.
+          Done when AC-38 holds for a window with rounds and for an empty
+          window.
+        priority: high
+        points: 3
+        tests:
+          - a kb_agent call made while a kickoff window is open is recorded with the kickoff runId
+          - agent_settled emits the "Usage this run" block for the window's records and closes the window
+          - a window that recorded no rounds emits no usage block
+          - the report printed at kickoff delivery states that the usage follows at the end of the kickoff run
+          - after an extension reload the window is gone, rounds get per-call ids and no block is emitted
+        acceptance:
+          - AC-38 a kb_agent call made while a kickoff window is open is recorded with the kickoff's runId; the window closes at agent_settled, which emits the "Usage this run" block for its records (a window with no recorded rounds emits no block)

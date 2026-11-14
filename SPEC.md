@@ -6,6 +6,8 @@ This document specifies the `kb-workflow` pi extension: the `/kb-plan` and `/kb-
 
 Changes vs v0.2.0: **subagent visibility**. The per-role resolution (FR-20/FR-21) is now surfaced instead of being silent: the TUI shows which model and thinking level every subagent round actually runs with (kb_agent tool streaming + custom rendering, /kb-dev report lines, message-mode kickoff), and a **usage ledger** persisted across runs records every round's token and euro spend, surfaced as per-run totals in the /kb-dev report and as cumulative totals via the new `/kb-cost` command. Covers the backlog items KB-40 (tui-model-display) and KB-41 (usage-ledger).
 
+Amended 2026-11-14 after the review of the usage-ledger story (AC-34..37 verified, review findings B/C/D/E): FR-27 record semantics (`agent` = subagent name; kickoff-window `runId` inheritance), FR-29 per-mode delivery of the usage block (bare: end of report; message: at kickoff settle), FR-30 TUI-only rendering (`pi.appendEntry` + entry renderer — the reports never enter the LLM context), plus AC-38..AC-40. The amendments land in the review-fixes story that blocks this version's epic.
+
 ### Goal and context
 
 Every subagent round already captures its usage in `SubagentResult.usage` (input, output, cacheRead, cacheWrite, cost, turns) and every spawn resolves a model and thinking level per role — but both are invisible: the resolution is not displayed anywhere in the TUI (the user cannot tell whether the `kb-agents` config took effect), and the usage is thrown away, so there is no way to know how many tokens and euros the harness consumes, in total or per role. The user wants both made observable, with the spend persisted across runs.
@@ -25,13 +27,15 @@ Every subagent round already captures its usage in `SubagentResult.usage` (input
 
 **FR-26 — Message-mode kickoff states the dispatch config.** The kickoff delivered to the main agent in message mode states the resolved model and thinking level per role that the rounds will be dispatched with.
 
-**FR-27 — Usage ledger.** Every subagent round appends one JSON record (one per line) to `<project>/.pi/kb-usage.jsonl`: `{ runId, at, agent, role, model, thinkingLevel, item, ok, usage: { input, output, cacheRead, cacheWrite, cost, turns } }`. `item` is the kb item ID when the round targets one, `null` otherwise (e.g. a kb_agent call without an item). `runId` identifies the /kb-dev invocation (or the individual kb_agent call). The file is append-only and never rewritten; malformed lines are skipped on read.
+**FR-27 — Usage ledger.** *(amended 2026-11-14)* Every subagent round appends one JSON record (one per line) to `<project>/.pi/kb-usage.jsonl`: `{ runId, at, agent, role, model, thinkingLevel, item, ok, usage: { input, output, cacheRead, cacheWrite, cost, turns } }`. `agent` is the **subagent name** (`kb-planner` / `kb-developer` / `kb-reviewer` / `kb-qa`); the kb claim actor is **not stored** — it is recomputable deterministically from `agent` + `item` (`actorForAgent(agent)`, plus `-<item>` when the round targets one). `item` is the kb item ID when the round targets one, `null` otherwise (e.g. a kb_agent call without an item). `runId` identifies the /kb-dev invocation: a kb_agent call **inherits the runId of the active kickoff window** when one is open (FR-29), otherwise it gets its own per-call id. The file is append-only and never rewritten; malformed lines are skipped on read.
 
 **FR-28 — Persistence points.** Both spawn paths record to the ledger: the dev/review/qa rounds of the /kb-dev orchestration (bare and message mode) and every kb_agent tool invocation. Failed rounds are recorded too (`ok: false`). A ledger write failure never fails the round or the run.
 
-**FR-29 — /kb-dev report totals.** The final /kb-dev report states this run's token and euro totals and a per-role (planner/developer/reviewer/qa) breakdown, with cacheRead and cacheWrite reported separately so the effective cost is interpretable.
+**FR-29 — /kb-dev report totals.** *(amended 2026-11-14)* This run's token and euro totals and per-role (planner/developer/reviewer/qa) breakdown, with cacheRead and cacheWrite reported separately so the effective cost is interpretable. Delivery is per mode:
+- **Bare mode**: the block lands at the end of the final report, aggregating this run's ledger records by `runId` (all rounds pass through the dispatch seam).
+- **Message mode**: the kickoff opens a **kickoff window** — the /kb-dev `runId` becomes the active kickoff in extension memory. Every kb_agent call inside the window records with that `runId` (FR-27), so the dev rounds the main agent spawns are attributed to the run. When the agent settles (`pi.on("agent_settled")`, `ctx.isIdle()` true), the extension emits the "Usage this run" block for the window's records — sweep plus kickoff rounds alike — through the TUI-only channel of FR-30 and closes the window. A window that recorded no rounds emits no block. The report printed at kickoff delivery states that the usage follows at the end of the kickoff run.
 
-**FR-30 — `/kb-cost` command.** Reads the ledger and renders the cumulative totals across all runs as **markdown** in a custom-message block (pi's `Markdown` component renders it — GFM table support confirmed): a table with one row per role (columns: role, model, tokens in/out, cache read/write, cost) plus a bold totals row; overall tokens and euros, breakdown per role and per model. Works with an empty or missing ledger (renders zeros).
+**FR-30 — `/kb-cost` command.** *(amended 2026-11-14)* Reads the ledger and renders the cumulative totals across all runs as **markdown**: a table with one row per role (columns: role, model, tokens in/out, cache read/write, cost) plus a bold totals row; overall tokens and euros, breakdown per role and per model. Works with an empty or missing ledger (renders zeros). Delivery is **TUI-only**: `pi.appendEntry` + `pi.registerEntryRenderer` — custom entries do **not** participate in LLM context, so the table never reaches the model (usable even while the agent is busy, no `isIdle` guard). The entry renderer reproduces the validated prototype look (the real `Markdown` component inside a `customMessageBg`-styled block, GFM table with bold totals row). The same TUI-only channel carries the message-mode "Usage this run" block of FR-29.
 
 **FR-31 — Usage returned to pi.** The kb_agent tool result carries the round's `usage`, so pi persists it on the tool result and includes it in the session totals (footer, `/session`).
 
@@ -50,6 +54,9 @@ Every subagent round already captures its usage in `SubagentResult.usage` (input
 - **AC-35:** the /kb-dev report shows this run's token/euro totals and per-role breakdown, with cache read/write separate.
 - **AC-36:** `/kb-cost` prints, with one command, the cumulative totals across runs broken down per role and per model; an empty ledger prints zeros.
 - **AC-37:** the kb_agent tool result carries `usage` and pi's session totals include the subagent spend.
+- **AC-38:** *(added 2026-11-14)* a kb_agent call made while a kickoff window is open is recorded with the kickoff's `runId`; the window closes at `agent_settled`, which emits the "Usage this run" block for its records (a window with no recorded rounds emits no block).
+- **AC-39:** *(added 2026-11-14)* the `/kb-cost` table and the "Usage this run" blocks are delivered TUI-only (`appendEntry` + entry renderer) and never enter the LLM context; `/kb-cost` is usable while the agent is busy.
+- **AC-40:** *(added 2026-11-14)* ledger records carry `agent` = subagent name (`kb-developer`, …) and the claim actor is recomputable from `agent` + `item`; the record shape matches FR-27 exactly.
 
 ### Dependencies and constraints
 
@@ -59,7 +66,7 @@ Every subagent round already captures its usage in `SubagentResult.usage` (input
   - **FR-23/24 land as variant A** — model and thinking level inline on the tool-call title line, next to the agent name (`kb_agent kb-developer [model · thinking high]`), thinking badge colored with the theme's per-level token (`thinkingHigh`, …);
   - the kb_agent tool-call shell is pi's own: `ToolExecutionComponent` wraps custom renderers in a state-tinted `Box` (`toolPendingBg`/`toolSuccessBg`) — the renderer draws no framing;
   - the round result footer carries duration, tokens in/out, cache r/w, cost and turns (variant A usage line);
-  - **FR-29** report totals and **FR-30** `/kb-cost` output are markdown rendered by the real `Markdown` component inside a `customMessageBg` block — the cost breakdown is a GFM table with a bold totals row, exactly as the prototype renders it.
+  - **FR-29** usage blocks and **FR-30** `/kb-cost` output are markdown rendered by the real `Markdown` component inside a `customMessageBg`-styled block — the cost breakdown is a GFM table with a bold totals row, exactly as the prototype renders it; since the 2026-11-14 amendment the delivery channel is TUI-only (`appendEntry` + entry renderer), so the look is unchanged but the content never enters the LLM context.
 - Board: KB-40 (tui-model-display, 3 pt), KB-41 (usage-ledger, 5 pt), both currently in `backlog`.
 
 ### Out of scope
