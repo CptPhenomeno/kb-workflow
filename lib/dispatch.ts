@@ -15,7 +15,9 @@
  * Every round spawned through this module — dev, reviewer and qa, bare and
  * message mode alike — is also persisted to the usage ledger with one entry
  * per round, successful or failed (FR-28), best-effort so a ledger failure
- * never fails the round or the run (NFR-15).
+ * never fails the round or the run (NFR-15). The final report of both modes
+ * carries a "Usage this run" block aggregated from this run's ledger
+ * records (FR-29).
  */
 
 import type { KbWorkflowConfig, SessionFallbacks } from "./config.ts";
@@ -24,6 +26,8 @@ import { runBareDev, type AgentRoundResult, type BareModeDeps } from "./bare-mod
 import { runMessageDev, type MessageModeDeps } from "./message-mode.ts";
 import { devTask, qaTask, reviewTask } from "./prompts.ts";
 import type { KbItem, KbRun } from "./kb.ts";
+import { renderRunUsageBlock } from "./cost-report.ts";
+import { readRecords } from "./usage-ledger.ts";
 import { ledgerPathFor, newRunId, recordRound } from "./round-ledger.ts";
 
 export type DevMode = { mode: "bare"; message: null } | { mode: "message"; message: string };
@@ -110,6 +114,14 @@ export async function dispatchDev(deps: DispatchDeps): Promise<{ report: string;
 	const spawnDev = async (task: KbItem, resolved: { model?: string; thinkingLevel?: string }) =>
 		run("kb-developer", task.id, devTask(task, await storyOf(task)), resolved);
 
+	// FR-29 / AC-35: the final report carries a "Usage this run" block —
+	// this run's token/euro totals and per-role breakdown, aggregated from
+	// this run's ledger records by runId. Both retrieval modes end here, so
+	// the block lands in the bare and the message report alike; a ledger
+	// that cannot be read degrades to an empty record set (NFR-15).
+	const withUsage = (report: string): string =>
+		`${report}\n\n${renderRunUsageBlock(readRecords(ledgerPath).filter((record) => record.runId === runId))}`;
+
 	if (parsed.mode === "message") {
 		const result = await runMessageDev({
 			cwd: deps.cwd,
@@ -124,7 +136,7 @@ export async function dispatchDev(deps: DispatchDeps): Promise<{ report: string;
 			notify: deps.notify,
 			setStatus: deps.setStatus,
 		});
-		return { report: result.report, delivered: result.delivered };
+		return { report: withUsage(result.report), delivered: result.delivered };
 	}
 	const result = await runBareDev({
 		cwd: deps.cwd,
@@ -137,5 +149,5 @@ export async function dispatchDev(deps: DispatchDeps): Promise<{ report: string;
 		notify: deps.notify,
 		setStatus: deps.setStatus,
 	});
-	return { report: result.report };
+	return { report: withUsage(result.report) };
 }

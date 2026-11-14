@@ -5,7 +5,12 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import { appendRecord, type UsageRecord } from "./usage-ledger.ts";
-import { renderCostReport, runCostCommand, type SentCustomMessage } from "./cost-report.ts";
+import {
+	renderCostReport,
+	renderRunUsageBlock,
+	runCostCommand,
+	type SentCustomMessage,
+} from "./cost-report.ts";
 
 function sampleRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
 	return {
@@ -118,6 +123,50 @@ test("/kb-cost on an empty or missing ledger renders zeros instead of failing", 
 	const md = renderCostReport([]);
 	assert.ok(md.includes("**kb-cost — cumulative across 0 runs**"), md);
 	assert.ok(md.includes("| **total** | | **0/0 (0/0)** | **€0.00** |"), md);
+});
+
+test("the run usage block states this run's totals and per-role breakdown", () => {
+	// One run: a developer and a reviewer round (the prototype's scenario).
+	const records = [
+		sampleRecord({ usage: { input: 4000, output: 3000, cacheRead: 1000000, cacheWrite: 2000, cost: 1.25, turns: 2 } }),
+		sampleRecord({
+			agent: "agent-review-KB-53",
+			role: "reviewer",
+			usage: { input: 2000, output: 1000, cacheRead: 500000, cacheWrite: 0, cost: 0.5, turns: 1 },
+		}),
+	];
+	const block = renderRunUsageBlock(records);
+	// The block layout of the prototype (key `t`, block variant):
+	//   **Usage this run**
+	//   - tokens: X in / Y out · cache A read / B write
+	//   - cost: **€Z** — developer €d · reviewer €r
+	assert.ok(block.includes("**Usage this run**"), block);
+	assert.ok(block.includes("- tokens: 6k in / 4k out"), block);
+	assert.ok(block.includes("- cost: **€1.75** — developer €1.25 · reviewer €0.50"), block);
+});
+
+test("the run usage block reports cache read and write separately from plain input and output", () => {
+	const records = [
+		sampleRecord({
+			usage: { input: 4000, output: 3000, cacheRead: 1000000, cacheWrite: 2000, cost: 1.25, turns: 2 },
+		}),
+	];
+	const block = renderRunUsageBlock(records);
+	// cacheRead and cacheWrite get their own numbers, not folded into the
+	// plain in/out totals, so the effective cost stays interpretable.
+	assert.ok(block.includes("cache 1.0M read / 2k write"), block);
+	// The plain tokens line must not have absorbed the cache numbers.
+	assert.ok(block.includes("- tokens: 4k in / 3k out · cache 1.0M read / 2k write"), block);
+	assert.ok(!block.includes("tokens: 1004k in"), block);
+});
+
+test("the run usage block renders zeros when the run recorded no rounds", () => {
+	const block = renderRunUsageBlock([]);
+	assert.ok(block.includes("**Usage this run**"), block);
+	assert.ok(block.includes("- tokens: 0 in / 0 out · cache 0 read / 0 write"), block);
+	assert.ok(block.includes("- cost: **€0.00**"), block);
+	// No roles ran: no per-role list, no dangling separator.
+	assert.ok(!block.includes("—"), block);
 });
 
 test("the command output is markdown rendered inside a custom-message block", () => {

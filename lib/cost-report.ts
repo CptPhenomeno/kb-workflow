@@ -1,8 +1,9 @@
 /**
- * /kb-cost command (FR-30 / AC-36): renders the cumulative token and euro
- * spend across all runs — per role and per model — as markdown.
+ * Cost reporting (FR-29 / FR-30 / AC-35 / AC-36): the pure renderers for
+ * the token/euro spend — the cumulative /kb-cost table across all runs and
+ * the "Usage this run" block appended to the /kb-dev report.
  *
- * The output is delivered through a custom-message block
+ * The /kb-cost output is delivered through a custom-message block
  * (`customType: "kb-workflow"`, `display: true`): pi's TUI renders custom
  * messages with the real Markdown component inside a customMessageBg block,
  * GFM tables included. The table layout reproduces the validated prototype
@@ -14,7 +15,13 @@
  * zeros, never an error (NFR-15).
  */
 
-import { readRecords, sumUsage, type UsageRecord, type UsageTotals } from "./usage-ledger.ts";
+import {
+	aggregateByRole,
+	readRecords,
+	sumUsage,
+	type UsageRecord,
+	type UsageTotals,
+} from "./usage-ledger.ts";
 import { ledgerPathFor } from "./round-ledger.ts";
 
 /** The custom message the command sends; pi renders it as markdown. */
@@ -113,6 +120,38 @@ export function renderCostReport(records: readonly UsageRecord[]): string {
 	}
 	lines.push(
 		`| **total** | | **${fmtTok(total.input)}/${fmtTok(total.output)} (${fmtTok(total.cacheRead)}/${fmtTok(total.cacheWrite)})** | **${fmtEuro(total.cost)}** |`,
+	);
+	return lines.join("\n");
+}
+
+/**
+ * Render the "Usage this run" block appended to the final /kb-dev report
+ * (FR-29 / AC-35): this run's token totals and euro cost with cacheRead and
+ * cacheWrite stated separately, plus a per-role breakdown. The block layout
+ * reproduces the validated prototype (prototype/kb-tui-prototype.mjs, key
+ * `t`, block variant) faithfully:
+ *
+ *   **Usage this run**
+ *   - tokens: X in / Y out · cache A read / B write
+ *   - cost: **€Z** — developer €d · reviewer €r
+ *
+ * The caller passes only this run's records (filtered by runId); an empty
+ * record set renders the same block with zeros and no per-role list (a run
+ * that recorded no rounds, NFR-15).
+ */
+export function renderRunUsageBlock(records: readonly UsageRecord[]): string {
+	const total = sumUsage(records);
+	const byRole = aggregateByRole(records);
+
+	const lines: string[] = [
+		"**Usage this run**",
+		`- tokens: ${fmtTok(total.input)} in / ${fmtTok(total.output)} out · cache ${fmtTok(total.cacheRead)} read / ${fmtTok(total.cacheWrite)} write`,
+	];
+	const perRole = [...byRole.entries()].map(([role, t]) => `${role} ${fmtEuro(t.cost)}`);
+	lines.push(
+		perRole.length > 0
+			? `- cost: **${fmtEuro(total.cost)}** — ${perRole.join(" · ")}`
+			: `- cost: **${fmtEuro(total.cost)}**`,
 	);
 	return lines.join("\n");
 }
