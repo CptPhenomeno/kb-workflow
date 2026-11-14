@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
 
-import { executeKbAgent } from "./agent-tool.ts";
+import { executeKbAgent, kbAgentToolResult } from "./agent-tool.ts";
 import type { KbWorkflowConfig } from "./config.ts";
-import type { KbAgentName, SubagentResult } from "./subagent.ts";
+import type { KbAgentName, SubagentResult, SubagentUsage } from "./subagent.ts";
 
 function config(partial: KbWorkflowConfig): KbWorkflowConfig {
 	return partial;
@@ -40,6 +43,122 @@ test("kb_agent tool resolves and forwards model and thinking-level per role", as
 	assert.deepEqual(seen, [
 		{ agent: "kb-developer", model: "provider/dev", thinkingLevel: "high" },
 	]);
+});
+
+function roundUsage(): SubagentUsage {
+	return { input: 1000, output: 500, cacheRead: 2000, cacheWrite: 100, cost: 0.42, turns: 3 };
+}
+
+function subagentResult(agent: KbAgentName): SubagentResult {
+	return {
+		ok: true,
+		agent,
+		actor: "agent-test",
+		output: `ran ${agent}`,
+		stderr: "",
+		exitCode: 0,
+		usage: roundUsage(),
+	};
+}
+
+/**
+ * pi accounts a tool's spend from the `usage` field of its result: tool
+ * results are persisted as `toolResult` messages and `getUsageCostBreakdown`
+ * (pi-coding-agent `dist/core/usage-totals.js`) sums their `usage` into the
+ * "Tools/summaries" bucket, reading `usage.cost.total`. Resolved from the
+ * installed pi release when present; a faithful local port of that function
+ * otherwise, so the suite also runs without a pi install.
+ */
+async function piUsageCostBreakdown(): Promise<
+	(entries: Array<{ type: string; message?: { role: string; usage?: unknown } }>) => Array<{ key: string; cost: number; tokens: number }>
+> {
+	const roots = [process.env.PI_MANAGED_INSTALL_ROOT, path.join(os.homedir(), ".pi", "agent", "install")].filter(
+		(root): root is string => typeof root === "string" && root !== "",
+	);
+	for (const root of roots) {
+		let versions: string[] = [];
+		try {
+			versions = fs.readdirSync(path.join(root, "releases")).sort().reverse();
+		} catch {
+			continue;
+		}
+		for (const version of versions) {
+			const modulePath = path.join(
+				root,
+				"releases",
+				version,
+				"node_modules",
+				"@earendil-works",
+				"pi-coding-agent",
+				"dist",
+				"core",
+				"usage-totals.js",
+			);
+			if (!fs.existsSync(modulePath)) continue;
+			const mod: { getUsageCostBreakdown?: unknown } = await import(modulePath);
+			if (typeof mod.getUsageCostBreakdown === "function") return mod.getUsageCostBreakdown as any;
+		}
+	}
+	// Faithful port of pi's getUsageCostBreakdown, toolResult branch only.
+	return (entries) => {
+		const totals = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }>();
+		for (const entry of entries) {
+			if (entry.type !== "message" || entry.message?.role !== "toolResult" || !entry.message.usage) continue;
+			const usage = entry.message.usage as Record<string, any>;
+			const t = totals.get("Tools/summaries") ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+			t.input += usage.input ?? 0;
+			t.output += usage.output ?? 0;
+			t.cacheRead += usage.cacheRead ?? 0;
+			t.cacheWrite += usage.cacheWrite ?? 0;
+			t.cost += usage.cost?.total ?? 0;
+			totals.set("Tools/summaries", t);
+		}
+		return Array.from(totals, ([key, t]) => ({
+			key,
+			cost: t.cost,
+			tokens: t.input + t.output + t.cacheRead + t.cacheWrite,
+		}));
+	};
+}
+
+test("kb_agent tool result carries the round usage in the field pi accounts for", () => {
+	const toolResult = kbAgentToolResult(subagentResult("kb-reviewer"));
+	// pi's `Usage` shape (pi-ai): cost is the cost object pi expects, with
+	// `total` — not the flat number of the internal SubagentUsage (FR-31).
+	assert.deepEqual(toolResult.usage, {
+		input: 1000,
+		output: 500,
+		cacheRead: 2000,
+		cacheWrite: 100,
+		totalTokens: 3600,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.42 },
+	});
+});
+
+test("pi's session totals include the kb_agent subagent spend", async () => {
+	const toolResult = kbAgentToolResult(subagentResult("kb-developer"));
+	// pi persists the tool result as a toolResult message entry and accounts
+	// its `usage` in the session totals (footer, /session, FR-31).
+	const entries = [{ type: "message", message: { role: "toolResult", usage: toolResult.usage } }];
+	const breakdown = await piUsageCostBreakdown();
+	const bucket = breakdown(entries).find((b) => b.key === "Tools/summaries");
+	assert.ok(bucket, "no Tools/summaries bucket in the session totals");
+	assert.equal(bucket.cost, 0.42);
+	assert.equal(bucket.tokens, 3600);
+});
+
+test("details still carry usage for the rendering", () => {
+	const res = subagentResult("kb-qa");
+	const toolResult = kbAgentToolResult(res);
+	// `details.usage` keeps the internal flat SubagentUsage (with `turns`),
+	// unchanged for the custom rendering (FR-31).
+	assert.deepEqual(toolResult.details, {
+		ok: res.ok,
+		agent: res.agent,
+		actor: res.actor,
+		exitCode: res.exitCode,
+		usage: roundUsage(),
+	});
 });
 
 test("kb_agent tool forwards the resolved model and thinking level", async () => {

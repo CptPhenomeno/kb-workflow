@@ -47,7 +47,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { executeKbAgent } from "./lib/agent-tool.ts";
+import { executeKbAgent, kbAgentToolResult } from "./lib/agent-tool.ts";
 import { runCostCommand } from "./lib/cost-report.ts";
 import { loadKbWorkflowConfig } from "./lib/config-load.ts";
 import { kbErrorMessage, runKb } from "./lib/kb.ts";
@@ -210,14 +210,11 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 						onUpdate: (t) => onUpdate?.({ content: [{ type: "text", text: t }], details: { agent, running: true } }),
 					}),
 			});
-			const header = res.ok
-				? `Subagent ${agent} completed.`
-				: `Subagent ${agent} FAILED (exit ${res.exitCode}${res.errorMessage ? `: ${res.errorMessage}` : ""}).`;
-			const stderr = res.stderr.trim();
-			return {
-				content: [{ type: "text", text: `${header}\n\n${res.output}${stderr ? `\n\nstderr:\n${stderr}` : ""}` }],
-				details: { ok: res.ok, agent, actor: res.actor, exitCode: res.exitCode, usage: res.usage },
-			};
+			// FR-31: the result carries the round's usage in pi's `Usage`
+			// shape on the field pi accounts a tool's spend from, so pi
+			// persists it and includes it in the session totals (footer,
+			// /session, RPC); `details.usage` keeps feeding the rendering.
+			return kbAgentToolResult(res);
 		},
 	});
 

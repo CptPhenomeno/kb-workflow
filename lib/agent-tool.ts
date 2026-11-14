@@ -8,8 +8,81 @@
  */
 
 import { resolveAgentConfig, type AgentRole, type KbWorkflowConfig, type SessionFallbacks } from "./config.ts";
-import type { KbAgentName, SubagentResult } from "./subagent.ts";
+import type { KbAgentName, SubagentResult, SubagentUsage } from "./subagent.ts";
 import { itemFromTask, newRunId, recordRound } from "./round-ledger.ts";
+
+/**
+ * pi's `Usage` shape (pi-ai), as far as this extension constructs it: the
+ * structural contract pi's accounting reads — `cost` is the cost object pi
+ * expects, with `total` (FR-31). The optional splits pi adds
+ * (`cacheWrite1h`, `reasoning`, `cost.totalFromProvider`) are simply absent.
+ */
+export interface PiUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	cost: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		total: number;
+	};
+}
+
+/**
+ * Convert the internal flat `SubagentUsage` to pi's `Usage` shape (FR-31):
+ * the subagent runner only knows the round's total cost, so it lands in
+ * `cost.total` — the field pi's session accounting reads — while the
+ * per-channel cost splits stay zero.
+ */
+export function toPiUsage(usage: SubagentUsage): PiUsage {
+	return {
+		input: usage.input,
+		output: usage.output,
+		cacheRead: usage.cacheRead,
+		cacheWrite: usage.cacheWrite,
+		totalTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: usage.cost },
+	};
+}
+
+/** The complete kb_agent tool result (FR-31): content for the model,
+ * `details` for the rendering, `usage` for pi's session totals. */
+export interface KbAgentToolResult {
+	content: Array<{ type: "text"; text: string }>;
+	details: {
+		ok: boolean;
+		agent: KbAgentName;
+		actor: string;
+		exitCode: number | null;
+		/** The internal flat usage, kept for the rendering (turns included). */
+		usage: SubagentUsage;
+	};
+	/** The round's usage in pi's `Usage` shape, so pi counts the subagent spend. */
+	usage: PiUsage;
+}
+
+/**
+ * Build the kb_agent tool result from a subagent outcome: the model-facing
+ * text (header, output, stderr), the rendering `details` and — new in FR-31 —
+ * the round's usage in pi's `Usage` shape on the field pi accounts a tool's
+ * spend from, so the footer, `/session` and RPC session totals include the
+ * subagent spend.
+ */
+export function kbAgentToolResult(res: SubagentResult): KbAgentToolResult {
+	const header = res.ok
+		? `Subagent ${res.agent} completed.`
+		: `Subagent ${res.agent} FAILED (exit ${res.exitCode}${res.errorMessage ? `: ${res.errorMessage}` : ""}).`;
+	const stderr = res.stderr.trim();
+	return {
+		content: [{ type: "text", text: `${header}\n\n${res.output}${stderr ? `\n\nstderr:\n${stderr}` : ""}` }],
+		details: { ok: res.ok, agent: res.agent, actor: res.actor, exitCode: res.exitCode, usage: res.usage },
+		usage: toPiUsage(res.usage),
+	};
+}
 
 /** Map a subagent name to its config role (`kb-developer` -> `developer`). */
 export const roleOf = (agent: KbAgentName): AgentRole => agent.replace("kb-", "") as AgentRole;
@@ -42,6 +115,8 @@ export interface KbAgentToolDeps {
 /**
  * Run one kb_agent tool invocation: resolve both properties for the role
  * and hand them, together with the agent name and task, to the runner.
+ * The returned `SubagentResult` feeds `kbAgentToolResult` for the tool's
+ * final result.
  */
 export async function executeKbAgent(deps: KbAgentToolDeps): Promise<SubagentResult> {
 	const resolved = resolveAgentConfig(roleOf(deps.agent), deps.config, deps.session);
