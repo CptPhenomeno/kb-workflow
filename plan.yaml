@@ -526,3 +526,360 @@ items:
               - no shipped config file still uses the models key
             acceptance:
               - AC-30 README, the index.ts header comment, kb-workflow.example.json and the repo's kb-workflow.json document/show the new kb-agents format
+
+  # ---------------------------------------------------------------- v0.2.1 epic
+  - ref: subagent-visibility-v021
+    type: epic
+    title: Subagent visibility — resolved config in the TUI and token/euro ledger (v0.2.1)
+    description: |
+      v0.2.0 made the model and thinking level configurable per role and
+      forwarded them to every spawn, but the resolution is invisible: the
+      user cannot tell whether the kb-agents config took effect, nor how
+      many tokens and euros the harness burns — every round already
+      captures its usage in SubagentResult.usage and throws it away.
+      SPEC.md v0.2.1 (FR-23..FR-31) surfaces both: the TUI shows the
+      resolved model and thinking level of every subagent round (kb_agent
+      streaming and custom rendering, /kb-dev report round lines, the
+      message-mode kickoff) and an append-only JSONL usage ledger at
+      <project>/.pi/kb-usage.jsonl persists every round, backing this run's
+      totals in the /kb-dev report and the cumulative totals of the new
+      /kb-cost command. The ledger records what was spent; it gates
+      nothing. The visual target for the TUI work is the validated
+      prototype prototype/kb-tui-prototype.mjs (gitignored, local to this
+      checkout; `node prototype/kb-tui-prototype.mjs`), which renders the
+      layouts with the real pi-tui components and theme.
+      The two stories are sequential in practice (the ledger records the
+      config the first story surfaces) but carry no blockers between them:
+      KB-40 before KB-41 is a work order, not a dependency.
+      Done when AC-31..AC-37 hold.
+    priority: high
+    acceptance:
+      - AC-31 during a kb_agent call the TUI shows the resolved model and thinking level of the running subagent (streamed text, details, and the custom rendering)
+      - AC-32 every round line of the /kb-dev report lists the model and thinking level the round ran with
+      - AC-33 the message-mode kickoff states the resolved per-role model and thinking level
+      - AC-34 every subagent round — orchestration and kb_agent, success or failure — is persisted to the ledger with run, item, role, model, thinking level, tokens and cost
+      - AC-35 the /kb-dev report shows this run's token/euro totals and per-role breakdown, with cache read/write separate
+      - AC-36 /kb-cost prints, with one command, the cumulative totals across runs broken down per role and per model; an empty ledger prints zeros
+      - AC-37 the kb_agent tool result carries usage and pi's session totals include the subagent spend
+    children:
+      - ref: tui-model-display
+        type: story
+        title: TUI shows the resolved model and thinking level of every subagent round
+        description: |
+          Every spawn already resolves a model and thinking level per role
+          (FR-20/FR-21), but nothing in the TUI shows them: the only signal
+          is the speed and quality of the output, so a misconfigured
+          kb-agents file is undetectable.
+          This story surfaces the resolved config everywhere the user
+          looks at a run: the kb_agent tool stream (FR-23), its custom
+          rendering (FR-24), the /kb-dev report round lines (FR-25) and the
+          message-mode kickoff (FR-26). The validated visual target is
+          prototype/kb-tui-prototype.mjs (gitignored, local; run with
+          `node prototype/kb-tui-prototype.mjs`), variant A — model and
+          thinking level inline on the tool-call title line, thinking badge
+          in the theme's per-level token, the tool-call shell left to pi's
+          own ToolExecutionComponent.
+          Done when AC-31, AC-32 and AC-33 hold.
+        priority: high
+        points: 3
+        acceptance:
+          - AC-31 during a kb_agent call the TUI shows the resolved model and thinking level of the running subagent (streamed text, details, and the custom rendering)
+          - AC-32 every round line of the /kb-dev report lists the model and thinking level the round ran with
+          - AC-33 the message-mode kickoff states the resolved per-role model and thinking level
+        children:
+          - ref: tui-agent-stream-config
+            type: task
+            title: kb_agent streams the resolved model and thinking level while the subagent runs
+            description: |
+              The kb_agent tool streams `details: { agent, running: true }`
+              today, so even the default rendering cannot show which model
+              the round actually runs with — the user cannot tell whether
+              the kb-agents config took effect.
+              The tool resolves the role's model and thinking level (FR-20,
+              the same resolveAgentConfig call that builds the spawn args)
+              and surfaces both on every `onUpdate` (FR-23): the streamed
+              text carries them (a `kb-developer · <model> · thinking high`
+              running line) and `details` becomes `{ agent, running, model,
+              thinkingLevel }`, so the default rendering shows them even
+              without a custom renderer. The values are the resolved ones —
+              configured, or the dispatching session's fallback — never the
+              raw config entries. The running line matches the running call
+              of prototype/kb-tui-prototype.mjs (variant A), the faithful
+              visual reference for this version.
+              Done when AC-31 holds for the streamed text and for `details`.
+            priority: high
+            points: 3
+            tests:
+              - kb_agent tool streams resolved model and thinking level in the tool-call details
+              - the onUpdate text carries the resolved model and thinking level of the running round
+              - details carry model and thinkingLevel on every update, not only the first
+              - a role absent from the config streams the session model and thinking level
+            blocks: [tui-agent-render]
+            acceptance:
+              - AC-31 the streamed text and details of a running kb_agent call carry the resolved model and thinking level
+          - ref: tui-agent-render
+            type: task
+            title: kb_agent renders the resolved config inline on the tool-call title line (variant A)
+            description: |
+              The default tool rendering shows the tool name and an args
+              preview; the resolved model and thinking level are what the
+              user needs to see, and the validated design puts them on the
+              tool-call title line.
+              Register `renderCall`/`renderResult` on the kb_agent tool
+              (FR-24) and reproduce variant A of
+              prototype/kb-tui-prototype.mjs faithfully (gitignored, local;
+              `node prototype/kb-tui-prototype.mjs`, ←/→ switches variants,
+              A won): the title line is
+              `kb_agent kb-developer [model · thinking high]` — the agent
+              name in toolTitle, the model in toolOutput, the thinking badge
+              in the theme's per-level token (thinkingOff / thinkingMinimal
+              / thinkingLow / thinkingMedium / thinkingHigh / thinkingXhigh
+              / thinkingMax, muted fallback). While running, the last
+              streamed line is shown; when finished, a `✓ completed` line
+              plus the variant A usage line (duration, tokens in/out, cache
+              r/w, cost, turns). The tool-call shell and framing are pi's
+              own — ToolExecutionComponent wraps custom renderers in a
+              state-tinted Box (toolPendingBg / toolSuccessBg) — so the
+              renderer draws no box, border, padding or spacer itself.
+              Done when AC-31 holds for the custom rendering and the output
+              matches the prototype's variant A.
+            priority: high
+            points: 5
+            tests:
+              - renderCall puts the resolved model and thinking level inline on the tool-call title line
+              - the thinking badge uses the theme's per-level thinking token
+              - renderResult shows the completed line with the variant A usage line (duration, tokens, cache, cost, turns)
+              - the renderer draws no framing of its own because pi's ToolExecutionComponent provides the box
+              - an expanded result shows every streamed line, a collapsed one the last two
+            acceptance:
+              - AC-31 the custom rendering shows the resolved model and thinking level of the running subagent
+          - ref: tui-round-result-config
+            type: task
+            title: Round results carry model, thinking level and usage; report round lines list them
+            description: |
+              The orchestration seam discards what a round ran with:
+              AgentRoundResult (lib/bare-mode.ts) is only
+              `{ ok, output, stderr, errorMessage? }`, so reportRound cannot
+              name the model and the usage captured in SubagentResult.usage
+              never reaches the report.
+              Extend AgentRoundResult with the resolved `model`,
+              `thinkingLevel` and `usage` of the round (FR-25), populated by
+              the dispatch seams in lib/dispatch.ts and index.ts from the
+              same resolution that builds the spawn args, and make every
+              reportRound line of the /kb-dev report list them as a muted
+              `[model · thinking high]` suffix — the round lines of
+              prototype/kb-tui-prototype.mjs are the faithful visual
+              reference (FR-29 adds the run totals below them). Failed
+              rounds report the model and thinking level they ran with too.
+              Done when AC-32 holds for bare mode, message mode and the qa
+              rounds.
+            priority: high
+            points: 3
+            tests:
+              - /kb-dev report lists model and thinking level per round
+              - AgentRoundResult carries model, thinkingLevel and usage for dev, reviewer and qa rounds
+              - a failed round still reports the model and thinking level it ran with
+            acceptance:
+              - AC-32 every round line of the /kb-dev report lists the model and thinking level the round ran with
+          - ref: tui-kickoff-config
+            type: task
+            title: Message-mode kickoff states the resolved per-role dispatch config
+            description: |
+              In message mode the main agent dispatches the rounds itself,
+              so it is the one that must know which model and thinking level
+              each role will spawn with; today the kickoff template
+              (devKickoff, lib/message-mode.ts) says nothing about the
+              dispatch config, and a misconfigured role is invisible until
+              the round behaves oddly.
+              Extend the fixed kickoff template (FR-26) with a short block
+              stating the resolved model and thinking level of all four
+              roles (planner, developer, reviewer, qa) that the rounds will
+              be dispatched with, resolved against the injected config and
+              the dispatching session exactly like the rounds themselves
+              (resolveForRole), so the kickoff cannot drift from what is
+              spawned.
+              Done when AC-33 holds and the block lists all four roles.
+            priority: high
+            points: 2
+            tests:
+              - message-mode kickoff states the resolved model and thinking level per role
+              - the kickoff lists all four roles with their resolved values
+              - the kickoff shows the session fallback for a role absent from the config
+            acceptance:
+              - AC-33 the message-mode kickoff states the resolved per-role model and thinking level
+
+      - ref: usage-ledger
+        type: story
+        title: "Token and euro spend: totals and per-role breakdown, persisted across runs"
+        description: |
+          Every subagent round already captures usage in
+          SubagentResult.usage (input, output, cacheRead, cacheWrite, cost,
+          turns), but the data is discarded: the /kb-dev report does not
+          include it and there is no cumulative total, so the cost of the
+          harness is unknown in total and per role.
+          This story persists every round to an append-only JSONL ledger at
+          <project>/.pi/kb-usage.jsonl behind a pure lib/usage-ledger.ts
+          module (FR-27), writes from both spawn paths including failed
+          rounds (FR-28), surfaces this run's totals and per-role breakdown
+          in the /kb-dev report (FR-29) and the cumulative totals via the
+          new /kb-cost command (FR-30), and returns the usage on the
+          kb_agent tool result so pi counts it in the session totals
+          (FR-31). Ledger I/O is best-effort and never fails a round or a
+          run (NFR-15), adds no dependency beyond Node builtins (NFR-16)
+          and stays unit-testable in a pi-free module (NFR-17). The
+          JSONL-over-JSON-array choice is deliberate: append-only for crash
+          safety and concurrent sessions, with /kb-cost as the read path.
+          Done when AC-34, AC-35, AC-36 and AC-37 hold.
+        priority: high
+        points: 5
+        acceptance:
+          - AC-34 every subagent round — orchestration and kb_agent, success or failure — is persisted to the ledger with run, item, role, model, thinking level, tokens and cost
+          - AC-35 the /kb-dev report shows this run's token/euro totals and per-role breakdown, with cache read/write separate
+          - AC-36 /kb-cost prints, with one command, the cumulative totals across runs broken down per role and per model; an empty ledger prints zeros
+          - AC-37 the kb_agent tool result carries usage and pi's session totals include the subagent spend
+        children:
+          - ref: ledger-module
+            type: task
+            title: Pure usage-ledger module appends and reads the JSONL ledger
+            description: |
+              The record shape, the append-only write and the tolerant read
+              must live in one place, or the two spawn paths and /kb-cost
+              drift apart; embedding fs calls in the dispatchers would also
+              make the behaviour untestable.
+              Add lib/usage-ledger.ts with no pi imports (NFR-17) holding
+              the record type of FR-27 — `{ runId, at, agent, role, model,
+              thinkingLevel, item, ok, usage: { input, output, cacheRead,
+              cacheWrite, cost, turns } }`, where `item` is the kb item ID
+              or null and `runId` identifies the /kb-dev invocation (or the
+              individual kb_agent call) — plus `appendRecord(path, record)`
+              appending one JSON line to <project>/.pi/kb-usage.jsonl
+              without ever rewriting the file, `readRecords(path)` skipping
+              malformed lines and returning [] for a missing or unreadable
+              file, and the pure aggregation functions (per role, per model,
+              totals, cacheRead/cacheWrite kept separate) that FR-29 and
+              FR-30 consume. Only Node builtins (fs) — no new dependency
+              (NFR-16) — and no ledger failure may throw out of the module
+              (NFR-15).
+              Done when the module round-trips records, tolerates a corrupt
+              ledger and its aggregations are unit-tested.
+            priority: high
+            points: 5
+            tests:
+              - appendRecord writes one JSON line per round to <project>/.pi/kb-usage.jsonl
+              - readRecords skips malformed lines and returns no records for a missing or unreadable ledger
+              - "the ledger file is append-only: existing lines are never rewritten"
+              - aggregation returns totals per role and per model with cacheRead and cacheWrite kept separate
+              - the module imports no pi package, only Node builtins
+            blocks: [ledger-persist]
+            acceptance:
+              - AC-34 the record carries runId, at, agent, role, model, thinkingLevel, item, ok and the usage numbers
+              - NFR-15 a missing, unreadable or corrupt ledger degrades to skipping records instead of throwing
+              - NFR-16 the ledger module uses only Node builtins
+              - NFR-17 the ledger lives in a pure module whose aggregations are unit-tested
+          - ref: ledger-persist
+            type: task
+            title: Every subagent round is persisted from both spawn paths
+            description: |
+              A ledger only one path writes is worse than none: the /kb-dev
+              orchestration and the kb_agent tool are both used, and a
+              failed round is exactly the one whose spend the user wants to
+              see.
+              Record one ledger entry per round from both spawn paths
+              (FR-28): the dev, reviewer and qa rounds of the /kb-dev
+              orchestration in bare and message mode (the dispatch seams in
+              lib/dispatch.ts and index.ts), and every kb_agent tool
+              invocation. Failed rounds are recorded too with `ok: false`;
+              `item` is the kb item ID the round targets, null for a
+              kb_agent call without one; `runId` is the /kb-dev invocation
+              id, or the individual kb_agent call id. The write is
+              best-effort: a ledger failure is swallowed (optionally noted
+              in the report) and never fails the round or the run (NFR-15).
+              Done when AC-34 holds for both paths, success and failure.
+            priority: high
+            points: 3
+            tests:
+              - each subagent round is persisted to the ledger with role, model, tokens and cost
+              - a failed round is recorded with ok false
+              - a kb_agent tool invocation is recorded with its own runId and item null when it targets no item
+              - a ledger write failure does not fail the round or the /kb-dev run
+            blocks: [ledger-report-totals, ledger-cost-command]
+            acceptance:
+              - AC-34 every orchestration and kb_agent round, successful or failed, is persisted with run, item, role, model, thinking level, tokens and cost
+              - NFR-15 a ledger write failure never fails the round or the run
+          - ref: ledger-report-totals
+            type: task
+            title: /kb-dev report states this run's token/euro totals and per-role breakdown
+            description: |
+              The report lists the rounds but not what they cost, so the
+              price of a run is invisible without leaving the TUI.
+              Append a usage block to the final /kb-dev report (FR-29):
+              this run's token totals (in/out), the euro cost, cacheRead and
+              cacheWrite reported separately so the effective cost is
+              interpretable, and a per-role breakdown for
+              planner/developer/reviewer/qa — aggregated from the run's
+              ledger records by runId. Render it as markdown inside the
+              custom-message block the report already uses, matching the
+              "Usage this run" block of prototype/kb-tui-prototype.mjs
+              (gitignored, local; key `t` toggles the block and inline
+              layouts — the block layout is the target).
+              Done when AC-35 holds for both retrieval modes.
+            priority: high
+            points: 3
+            tests:
+              - /kb-dev report shows this run's totals and per-role breakdown
+              - cacheRead and cacheWrite are reported separately from the plain input and output tokens
+              - the usage block counts only the records of this run
+            acceptance:
+              - AC-35 the /kb-dev report shows this run's token/euro totals and per-role breakdown, with cache read/write separate
+          - ref: ledger-cost-command
+            type: task
+            title: /kb-cost renders the cumulative totals as a markdown table
+            description: |
+              Per-run figures answer "what did this run cost"; the user also
+              wants the cumulative spend across all runs, per role and per
+              model, from one command.
+              Add the `/kb-cost` command (FR-30): it reads the ledger
+              through lib/usage-ledger.ts and renders the cumulative totals
+              in a custom-message block as markdown — pi's Markdown
+              component renders it, GFM tables included — with a table
+              holding one row per role (role, model, tokens in/out, cache
+              read/write, cost) plus a bold totals row, and the overall
+              tokens and euros. Reproduce the table layout of
+              prototype/kb-tui-prototype.mjs faithfully (gitignored, local;
+              key `c` toggles the table and compact layouts — the table is
+              the target) inside a customMessageBg block. An empty or
+              missing ledger renders the same table with zeros, never an
+              error (NFR-15).
+              Done when AC-36 holds.
+            priority: high
+            points: 5
+            tests:
+              - cumulative totals are readable with one command across runs
+              - /kb-cost renders a GFM table with one row per role and a bold totals row
+              - /kb-cost on an empty or missing ledger renders zeros instead of failing
+              - the command output is markdown rendered inside a custom-message block
+            acceptance:
+              - AC-36 /kb-cost prints, with one command, the cumulative totals across runs broken down per role and per model; an empty ledger prints zeros
+          - ref: usage-kb-agent-result
+            type: task
+            title: kb_agent tool result carries usage so pi counts the subagent spend
+            description: |
+              The kb_agent tool returns usage only inside `details`, but pi
+              accounts a tool's spend from the `usage` field of its result,
+              so the subagent cost never reaches the session totals and the
+              footer and /session understate the real spend.
+              Return the round's usage on the kb_agent tool result in pi's
+              `Usage` shape — cost as the cost object pi expects (with
+              `total`), not the flat number of the internal SubagentUsage —
+              so pi persists it on the tool result and includes it in the
+              footer, /session and RPC session totals (FR-31), while
+              `details.usage` keeps feeding the rendering.
+              Done when AC-37 holds.
+            priority: high
+            points: 2
+            tests:
+              - kb_agent tool result carries the round usage in the field pi accounts for
+              - pi's session totals include the kb_agent subagent spend
+              - details still carry usage for the rendering
+            acceptance:
+              - AC-37 the kb_agent tool result carries usage and pi's session totals include the subagent spend
