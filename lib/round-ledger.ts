@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { appendRecord, type Usage, type UsageRecord } from "./usage-ledger.ts";
 import { roleOf } from "./agent-tool.ts";
-import { actorForAgent, type KbAgentName, type SubagentUsage } from "./subagent.ts";
+import { type KbAgentName, type SubagentUsage } from "./subagent.ts";
 
 /** The ledger location (FR-27): `<project>/.pi/kb-usage.jsonl`. */
 export function ledgerPathFor(cwd: string): string {
@@ -58,16 +58,19 @@ export interface RoundRecordInput {
 }
 
 /**
- * Build the FR-27 record for one round. Properties that did not resolve to
- * a concrete value (neither from the config nor from the session) are
- * recorded as `"unknown"` — the record shape requires strings.
+ * Build the FR-27 record for one round. `agent` is the subagent name
+ * (`kb-planner` / `kb-developer` / `kb-reviewer` / `kb-qa`); the kb claim
+ * actor is not stored — it is recomputable from `agent` + `item` via
+ * `actorForAgent(agent)`, plus `-<item>` when the round targets one
+ * (AC-40). Properties that did not resolve to a concrete value (neither
+ * from the config nor from the session) are recorded as `"unknown"` —
+ * the record shape requires strings.
  */
 export function roundRecord(input: RoundRecordInput): UsageRecord {
-	const actor = actorForAgent(input.agent);
 	return {
 		runId: input.runId,
 		at: new Date().toISOString(),
-		agent: input.item ? `${actor}-${input.item}` : actor,
+		agent: input.agent,
 		role: roleOf(input.agent),
 		model: input.resolved.model ?? "unknown",
 		thinkingLevel: input.resolved.thinkingLevel ?? "unknown",

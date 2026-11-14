@@ -26,7 +26,7 @@ function sampleRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
 	return {
 		runId: "run-1",
 		at: "2026-11-14T10:00:00Z",
-		agent: "agent-dev-KB-53",
+		agent: "kb-developer",
 		role: "developer",
 		model: "claude-sonnet-4-5",
 		thinkingLevel: "high",
@@ -163,4 +163,30 @@ test("the module imports no pi package, only Node builtins", () => {
 	for (const specifier of imports) {
 		assert.match(specifier, /^node:/, `import must be a Node builtin, got: ${specifier}`);
 	}
+});
+
+test("isUsageRecord accepts a record whose agent is a subagent name", () => {
+	const ledger = tempLedger();
+	fs.mkdirSync(path.dirname(ledger), { recursive: true });
+	// FR-27 (amended): `agent` is the subagent name, with or without an item.
+	const withItem = sampleRecord({ agent: "kb-qa", role: "qa", item: "KB-53" });
+	const withoutItem = sampleRecord({ agent: "kb-planner", role: "planner", item: null });
+	fs.writeFileSync(ledger, `${JSON.stringify(withItem)}\n${JSON.stringify(withoutItem)}\n`);
+
+	assert.deepEqual(readRecords(ledger), [withItem, withoutItem]);
+});
+
+test("existing lines are never rewritten, so no migration is needed", () => {
+	const ledger = tempLedger();
+	const first = sampleRecord();
+	appendRecord(ledger, first);
+
+	const contentAfterFirst = fs.readFileSync(ledger, "utf8");
+	assert.equal(contentAfterFirst, `${JSON.stringify(first)}\n`);
+
+	// A later append leaves the earlier line byte-identical (append-only).
+	appendRecord(ledger, { ...sampleRecord(), runId: "run-2" });
+	const lines = fs.readFileSync(ledger, "utf8").split("\n").filter(Boolean);
+	assert.equal(lines.length, 2);
+	assert.equal(lines[0], JSON.stringify(first));
 });

@@ -15,6 +15,7 @@ import { test } from "node:test";
 import { dispatchDev } from "./dispatch.ts";
 import { executeKbAgent } from "./agent-tool.ts";
 import { readRecords } from "./usage-ledger.ts";
+import { actorForAgent } from "./subagent.ts";
 import type { KbWorkflowConfig, SessionFallbacks } from "./config.ts";
 import type { KbItem, KbRun } from "./kb.ts";
 import type { AgentRoundResult } from "./bare-mode.ts";
@@ -116,7 +117,8 @@ test("each subagent round is persisted to the ledger with role, model, tokens an
 	assert.equal(dev.model, "provider/dev");
 	assert.equal(dev.thinkingLevel, "high");
 	assert.equal(dev.item, "KB-42");
-	assert.equal(dev.agent, "agent-dev-KB-42");
+	// FR-27 (amended): `agent` is the subagent name, no item suffix.
+	assert.equal(dev.agent, "kb-developer");
 	assert.ok(dev.runId.length > 0, "the record carries the /kb-dev invocation id");
 	assert.equal(dev.ok, true);
 	assert.deepEqual(dev.usage, USAGE);
@@ -177,6 +179,9 @@ test("a kb_agent tool invocation is recorded with its own runId and item null wh
 	const [withItem, withoutItem] = records;
 	assert.equal(withItem.item, "KB-8", "the targeted kb item is recorded");
 	assert.equal(withoutItem.item, null, "no targeted item is recorded as null");
+	// The `agent` field is the subagent name regardless of the item.
+	assert.equal(withItem.agent, "kb-developer");
+	assert.equal(withoutItem.agent, "kb-developer");
 	assert.notEqual(withItem.runId, withoutItem.runId, "each kb_agent call has its own runId");
 
 	assert.equal(withItem.role, "developer");
@@ -184,6 +189,47 @@ test("a kb_agent tool invocation is recorded with its own runId and item null wh
 	assert.equal(withItem.thinkingLevel, "high");
 	assert.equal(withItem.ok, true);
 	assert.deepEqual(withItem.usage, USAGE);
+});
+
+test("a ledger record's agent field is the subagent name with no item suffix", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	await dispatchDev(dispatchDeps(dir, async () => roundResult()));
+
+	const records = readRecords(path.join(dir, ".pi", "kb-usage.jsonl"));
+	const agents = records.map((r) => r.agent);
+	assert.deepEqual(agents, ["kb-developer", "kb-reviewer"],
+		"agent is the bare subagent name, no actor prefix and no -<item> suffix");
+});
+
+test("the claim actor is not stored in the record and is recomputable from agent plus item", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	await dispatchDev(dispatchDeps(dir, async () => roundResult()));
+
+	const records = readRecords(path.join(dir, ".pi", "kb-usage.jsonl"));
+	assert.equal(records.length, 2);
+
+	// No field stores the claim actor: the record shape is exactly FR-27.
+	const persisted = fs.readFileSync(path.join(dir, ".pi", "kb-usage.jsonl"), "utf8")
+		.split("\n").filter(Boolean).map((line) => Object.keys(JSON.parse(line)));
+	assert.ok(persisted.every((keys) => !keys.includes("actor") && !keys.includes("claimActor")));
+
+	// The claim actor is recomputable from `agent` + `item` (AC-40).
+	const [dev, rev] = records;
+	assert.equal(`${actorForAgent(dev.agent as KbAgentName)}-${dev.item}`, "agent-dev-KB-42");
+	assert.equal(`${actorForAgent(rev.agent as KbAgentName)}-${rev.item}`, "agent-review-KB-42");
+});
+
+test("index.ts wires the kb_agent ledger through ledgerPathFor so the FR-27 location has one source of truth", () => {
+	const indexTs = fs.readFileSync(path.join(import.meta.dirname, "..", "index.ts"), "utf8");
+	// The FR-27 location is defined once, in lib/round-ledger.ts (finding B).
+	assert.ok(indexTs.includes('ledgerPathFor(ctx.cwd)'),
+		"index.ts must call ledgerPathFor(ctx.cwd) for the kb_agent ledger");
+	assert.ok(!indexTs.includes('kb-usage.jsonl'),
+		"index.ts must not inline the ledger path");
 });
 
 test("a ledger write failure does not fail the round or the /kb-dev run", async (t) => {

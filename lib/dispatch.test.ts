@@ -256,7 +256,7 @@ test("the usage block counts only the records of this run", async (t) => {
 	appendRecord(ledgerPath, {
 		runId: "kb-dev-previous-run",
 		at: "2026-11-14T09:00:00Z",
-		agent: "agent-dev-KB-42",
+		agent: "kb-developer",
 		role: "developer",
 		model: "anthropic/claude-sonnet-4.5",
 		thinkingLevel: "high",

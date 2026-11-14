@@ -30,7 +30,9 @@ export interface UsageRecord {
 	runId: string;
 	/** ISO timestamp of the round. */
 	at: string;
-	/** The kb actor name, e.g. `agent-dev-KB-53`. */
+	/** The subagent name, e.g. `kb-developer` (FR-27); the kb claim
+	 * actor is not stored — it is recomputable from `agent` + `item`
+	 * via `actorForAgent(agent)`, plus `-<item>` when one is targeted. */
 	agent: string;
 	/** planner / developer / reviewer / qa. */
 	role: string;

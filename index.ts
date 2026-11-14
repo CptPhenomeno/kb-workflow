@@ -53,6 +53,7 @@ import { loadKbWorkflowConfig } from "./lib/config-load.ts";
 import { kbErrorMessage, runKb } from "./lib/kb.ts";
 import { preFlightCheck } from "./lib/git.ts";
 import { dispatchDev } from "./lib/dispatch.ts";
+import { ledgerPathFor } from "./lib/round-ledger.ts";
 import { runSubagent, type KbAgentName } from "./lib/subagent.ts";
 
 const AgentParam = StringEnum(["kb-planner", "kb-developer", "kb-reviewer", "kb-qa"] as const, {
@@ -201,7 +202,8 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 				session,
 				// Every kb_agent invocation is persisted to the usage ledger
 				// (FR-28), best-effort: a ledger failure never fails the round.
-				ledgerPath: path.join(ctx.cwd, ".pi", "kb-usage.jsonl"),
+				// The FR-27 location has one source of truth: ledgerPathFor.
+				ledgerPath: ledgerPathFor(ctx.cwd),
 				runSubagent: (opts) =>
 					runSubagent({
 						...opts,
