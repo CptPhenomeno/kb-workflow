@@ -17,6 +17,7 @@
 import { resolveForRole, sweepPendingReviews, type AgentRoundResult } from "./bare-mode.ts";
 import type { RoleConfig, KbWorkflowConfig, SessionFallbacks } from "./config.ts";
 import type { KbItem, KbRun } from "./kb.ts";
+import { KB_AGENT_NAMES } from "./subagent.ts";
 
 export interface MessageModeDeps {
 	cwd: string;
@@ -51,18 +52,41 @@ export interface MessageModeResult {
 	delivered: boolean;
 }
 
+/** The config/session pair the kickoff's dispatch-config block resolves
+ * against (FR-26) — the same shape as the rounds' own resolution seam. */
+export interface KickoffConfigDeps {
+	config?: KbWorkflowConfig;
+	session?: SessionFallbacks;
+}
+
 /**
  * The fixed kickoff template delivered to the main pi agent in message mode
  * (FR-10 step 3, AC-14/AC-15). The main agent interprets the message,
  * identifies the pertinent items, asks the user when unclear, and works the
  * items in DAG order through the standard pipeline.
+ *
+ * The template states the resolved per-role dispatch config (FR-26): the
+ * model and thinking level every kb_agent round will spawn with, resolved
+ * through resolveForRole — the very function the rounds themselves resolve
+ * with — against the injected config and the dispatching session, so the
+ * kickoff cannot drift from what is spawned. A property that resolved to
+ * nothing reads "unknown", the same semantics as the report round lines and
+ * the ledger records.
  */
-export function devKickoff(message: string): string {
+export function devKickoff(message: string, deps?: KickoffConfigDeps): string {
+	const dispatchConfig = KB_AGENT_NAMES.map((agent) => {
+		const resolved = resolveForRole(agent, deps ?? {});
+		return `- ${agent.replace("kb-", "")}: ${resolved.model ?? "unknown"} · thinking ${resolved.thinkingLevel ?? "unknown"}`;
+	}).join("\n");
 	return `The user steered this /kb-dev run with the following message; treat it as OPERATIONAL INSTRUCTIONS for working the kb kanban board of this project — not as an idea to plan or spec:
 
 """
 ${message}
 """
+
+DISPATCH CONFIG — RESOLVED MODEL AND THINKING LEVEL PER ROLE
+The kb_agent rounds you spawn are dispatched with the following resolved dispatch config (each property falls back to this session's value when unset in the config):
+${dispatchConfig}
 
 STEP 1 — INTERPRETATION
 Interpret the message as instructions for what to work on now. Inspect the board first: run \`kb list --json\` (and \`kb tree\` if helpful) to see the items, their statuses, titles, descriptions and test states.
@@ -112,7 +136,7 @@ export async function runMessageDev(deps: MessageModeDeps): Promise<MessageModeR
 	// 3. Deliver the message as a kickoff to the main pi agent (FR-10 step 3).
 	//    Nothing else: item selection and orchestration belong to the main
 	//    agent (FR-10 step 4).
-	const kickoff = devKickoff(deps.message);
+	const kickoff = devKickoff(deps.message, deps);
 	deps.setStatus?.("delivering kickoff");
 	await deps.sendUserMessage(kickoff);
 	report.push(`- kickoff delivered to the main agent for the message: "${deps.message}"`);

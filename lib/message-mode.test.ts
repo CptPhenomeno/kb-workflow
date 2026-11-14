@@ -269,6 +269,85 @@ test("message-mode round resolves and forwards model and thinking-level per role
 	assert.deepEqual(seen, [{ model: "provider/rev", thinkingLevel: "low" }]);
 });
 
+// ---------------------------------------------------------------------------
+// KB-51: the kickoff states the resolved per-role dispatch config (FR-26).
+// ---------------------------------------------------------------------------
+
+test("message-mode kickoff states the resolved model and thinking level per role", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const result = await runMessageDev({
+		cwd: dir,
+		message: "work on KB-42",
+		kb: fakeKb(new Map([["list", () => kbRun([])]]), []),
+		preFlight: async () => ({ ok: true, branch: "develop" as const }),
+		spawnReviewer: async () => {
+			throw new Error("unreachable");
+		},
+		config: {
+			kbAgents: { developer: { model: "provider/dev", thinkingLevel: "high" } },
+		},
+		session: { model: "provider/session", thinkingLevel: "medium" },
+		sendUserMessage: async () => {},
+	});
+
+	assert.equal(result.delivered, true);
+	// FR-26 / AC-33: the delivered kickoff states the resolved per-role
+	// model and thinking level — the configured developer role shows both.
+	assert.match(result.kickoff, /provider\/dev/);
+	assert.match(result.kickoff, /thinking high/);
+	// The kickoff is still the fixed template plus the message, resolved
+	// against the same config and session as the rounds themselves.
+	assert.equal(result.kickoff, devKickoff("work on KB-42", {
+		config: { kbAgents: { developer: { model: "provider/dev", thinkingLevel: "high" } } },
+		session: { model: "provider/session", thinkingLevel: "medium" },
+	}));
+});
+
+test("the kickoff lists all four roles with their resolved values", () => {
+	const kickoff = devKickoff("finish everything", {
+		config: {
+			kbAgents: {
+				planner: { model: "provider/plan", thinkingLevel: "low" },
+				developer: { model: "provider/dev", thinkingLevel: "high" },
+				reviewer: { model: "provider/rev", thinkingLevel: "medium" },
+				qa: { model: "provider/qa", thinkingLevel: "minimal" },
+			},
+		},
+	});
+
+	// All four roles are listed, each with its resolved model and thinking level.
+	assert.match(kickoff, /planner: provider\/plan · thinking low/);
+	assert.match(kickoff, /developer: provider\/dev · thinking high/);
+	assert.match(kickoff, /reviewer: provider\/rev · thinking medium/);
+	assert.match(kickoff, /qa: provider\/qa · thinking minimal/);
+	// The block states what the values are for (the kb_agent round dispatch).
+	assert.match(kickoff, /kb_agent/);
+});
+
+test("the kickoff shows the session fallback for a role absent from the config", () => {
+	const kickoff = devKickoff("work on the login story", {
+		config: {
+			kbAgents: { developer: { model: "provider/dev" } },
+		},
+		session: { model: "provider/session", thinkingLevel: "medium" },
+	});
+
+	// A role absent from the config falls back to the dispatching session's
+	// values (the same independent per-property fallback as resolveForRole).
+	assert.match(kickoff, /planner: provider\/session · thinking medium/);
+	assert.match(kickoff, /reviewer: provider\/session · thinking medium/);
+	assert.match(kickoff, /qa: provider\/session · thinking medium/);
+	// Each property falls back independently: the configured developer model
+	// keeps its thinking level from the session.
+	assert.match(kickoff, /developer: provider\/dev · thinking medium/);
+	// A property that resolved to nothing reads "unknown", the same
+	// semantics as the report round lines and the ledger records.
+	const bare = devKickoff("work");
+	assert.match(bare, /planner: unknown · thinking unknown/);
+});
+
 test("the report printed at kickoff delivery states that the usage follows at the end of the kickoff run", async (t) => {
 	const dir = tmpRepo();
 	t.after(() => {
