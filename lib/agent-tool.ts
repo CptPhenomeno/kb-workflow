@@ -9,6 +9,7 @@
 
 import { resolveAgentConfig, type AgentRole, type KbWorkflowConfig, type SessionFallbacks } from "./config.ts";
 import type { KbAgentName, SubagentResult, SubagentUsage } from "./subagent.ts";
+import { activeKickoffRunId } from "./kickoff-window.ts";
 import { itemFromTask, newRunId, recordRound } from "./round-ledger.ts";
 
 /**
@@ -108,7 +109,11 @@ export interface KbAgentToolDeps {
 	onUpdate?: (text: string) => void;
 	/** Ledger location (FR-27); when set, the invocation is persisted (FR-28). */
 	ledgerPath?: string;
-	/** Identifies this kb_agent invocation in the ledger (default: a fresh id). */
+	/**
+	 * Identifies this invocation's run in the ledger: an explicit id wins;
+	 * otherwise the call inherits the open kickoff window's runId (FR-27/
+	 * FR-29, AC-38) and only with no window open gets a fresh per-call id.
+	 */
 	runId?: string;
 }
 
@@ -131,10 +136,13 @@ export async function executeKbAgent(deps: KbAgentToolDeps): Promise<SubagentRes
 	// FR-28: every kb_agent invocation is persisted to the usage ledger,
 	// successful or failed, best-effort (NFR-15): a ledger failure never
 	// fails the round. `item` is the kb item ID the task targets, null when
-	// it targets none; `runId` identifies this individual call.
+	// it targets none. `runId` identifies the invocation's run: an explicit
+	// one wins; otherwise the call inherits the runId of the open kickoff
+	// window (FR-27/FR-29, AC-38), and only with no window open does it get
+	// its own per-call id.
 	if (deps.ledgerPath) {
 		recordRound(deps.ledgerPath, {
-			runId: deps.runId ?? newRunId("kb-agent"),
+			runId: deps.runId ?? activeKickoffRunId() ?? newRunId("kb-agent"),
 			agent: deps.agent,
 			item: itemFromTask(deps.task),
 			resolved,

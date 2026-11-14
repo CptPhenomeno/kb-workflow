@@ -52,6 +52,7 @@ import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { executeKbAgent, kbAgentToolResult } from "./lib/agent-tool.ts";
 import { runCostCommand } from "./lib/cost-report.ts";
+import { settleKickoffWindow } from "./lib/kickoff-window.ts";
 import { registerUsageEntryRenderer } from "./lib/usage-entry-renderer.ts";
 import { loadKbWorkflowConfig } from "./lib/config-load.ts";
 import { kbErrorMessage, runKb } from "./lib/kb.ts";
@@ -100,6 +101,16 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 	// "Usage this run" block) are displayed but never billed to the model.
 	// ---------------------------------------------------------------------------
 	registerUsageEntryRenderer(pi);
+
+	// ---------------------------------------------------------------------------
+	// FR-29 (amended, KB-61 / AC-38): when the kickoff run settles, emit the
+	// "Usage this run" block for the kickoff window's records through the
+	// TUI-only channel and close the window. ctx.isIdle() is true here; a
+	// missing window (e.g. after an extension reload) is a no-op.
+	// ---------------------------------------------------------------------------
+	pi.on("agent_settled", (_event, ctx) => {
+		settleKickoffWindow({ cwd: ctx.cwd, appendEntry: (customType, data) => pi.appendEntry(customType, data) });
+	});
 
 	// ---------------------------------------------------------------------------
 	// Tool: ask_user — ask the user a question through the TUI dialogs.
@@ -214,7 +225,8 @@ export default function kbWorkflow(pi: ExtensionAPI) {
 				session,
 				// Every kb_agent invocation is persisted to the usage ledger
 				// (FR-28), best-effort: a ledger failure never fails the round.
-				// The FR-27 location has one source of truth: ledgerPathFor.
+				// The FR-27 location has one source of truth: ledgerPathFor; the
+				// runId inherits the open kickoff window when one is (FR-27/FR-29).
 				ledgerPath: ledgerPathFor(ctx.cwd),
 				runSubagent: (opts) =>
 					runSubagent({

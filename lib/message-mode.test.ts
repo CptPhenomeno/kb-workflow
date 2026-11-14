@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import { devKickoff, runMessageDev } from "./message-mode.ts";
+import { closeKickoffWindow } from "./kickoff-window.ts";
 import type { KbItem, KbRun } from "./kb.ts";
 
 function tmpRepo(): string {
@@ -266,4 +267,31 @@ test("message-mode round resolves and forwards model and thinking-level per role
 	});
 
 	assert.deepEqual(seen, [{ model: "provider/rev", thinkingLevel: "low" }]);
+});
+
+test("the report printed at kickoff delivery states that the usage follows at the end of the kickoff run", async (t) => {
+	const dir = tmpRepo();
+	t.after(() => {
+		fs.rmSync(dir, { recursive: true, force: true });
+		closeKickoffWindow();
+	});
+
+	const result = await runMessageDev({
+		cwd: dir,
+		message: "work on KB-42",
+		kb: fakeKb(new Map([["list", () => kbRun([])]]), []),
+		preFlight: async () => ({ ok: true, branch: "develop" as const }),
+		spawnReviewer: async () => {
+			assert.fail("no reviewer round when the review column is empty");
+			throw new Error("unreachable");
+		},
+		sendUserMessage: async () => {},
+	});
+
+	assert.equal(result.delivered, true);
+	// FR-29 (amended): in message mode the usage block is emitted when the
+	// kickoff run settles, not in this report — the report says so.
+	assert.match(result.report, /usage follows at the end of the kickoff run/i, result.report);
+	// The block itself is not part of the kickoff-delivery report.
+	assert.ok(!result.report.includes("**Usage this run**"), result.report);
 });

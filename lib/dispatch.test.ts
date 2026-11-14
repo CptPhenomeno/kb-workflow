@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import { dispatchDev, parseDevArgs } from "./dispatch.ts";
+import { activeKickoffRunId, closeKickoffWindow } from "./kickoff-window.ts";
 import { appendRecord } from "./usage-ledger.ts";
 
 // The bare mode runs real git seams (runDeveloperRound), so it needs a
@@ -230,9 +231,12 @@ test("bare-mode /kb-dev report shows this run's totals and per-role breakdown", 
 	assert.ok(result.report.includes("- cost: **€1.75** — developer €1.25 · reviewer €0.50"), result.report);
 });
 
-test("message-mode /kb-dev report shows the usage block too", async (t) => {
+test("message mode opens a kickoff window instead of putting the usage block in the report", async (t) => {
 	const dir = tmpRepo();
-	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	t.after(() => {
+		fs.rmSync(dir, { recursive: true, force: true });
+		closeKickoffWindow();
+	});
 	const ledgerPath = path.join(dir, ".pi", "kb-usage.jsonl");
 
 	const result = await dispatchDev(dispatchTestDeps({
@@ -243,9 +247,28 @@ test("message-mode /kb-dev report shows the usage block too", async (t) => {
 		sendUserMessage: async () => {},
 	}));
 
-	// No round ran under this run id: the block still states the totals (zeros).
-	assert.ok(result.report.includes("**Usage this run**"), result.report);
-	assert.ok(result.report.includes("- cost: **€0.00**"), result.report);
+	// FR-29 (amended, KB-61): the delivered kickoff opens a kickoff window
+	// with the /kb-dev runId as the active kickoff (AC-38) — the block is
+	// emitted when the kickoff run settles, not in this report.
+	assert.equal(result.delivered, true);
+	assert.equal(activeKickoffRunId(), "kb-dev-this-run");
+	assert.ok(!result.report.includes("**Usage this run**"), result.report);
+	assert.match(result.report, /usage follows at the end of the kickoff run/i, result.report);
+
+	// An aborted (never delivered) message run opens no window.
+	closeKickoffWindow();
+	const aborted = await dispatchDev(dispatchTestDeps({
+		args: "fix the broken tests",
+		cwd: dir,
+		ledgerPath,
+		runId: "kb-dev-aborted-run",
+		preFlight: async () => ({ ok: false, error: "Working tree is dirty." }),
+		sendUserMessage: async () => {
+			assert.fail("no kickoff after a failed pre-flight");
+		},
+	}));
+	assert.equal(aborted.delivered, false);
+	assert.equal(activeKickoffRunId(), null);
 });
 
 test("the usage block counts only the records of this run", async (t) => {

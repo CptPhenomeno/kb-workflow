@@ -116,6 +116,9 @@ export async function runMessageDev(deps: MessageModeDeps): Promise<MessageModeR
 	deps.setStatus?.("delivering kickoff");
 	await deps.sendUserMessage(kickoff);
 	report.push(`- kickoff delivered to the main agent for the message: "${deps.message}"`);
+	// FR-29 (amended): the usage block is emitted when the kickoff run
+	// settles, not in this report — the report says so.
+	report.push("- usage follows at the end of the kickoff run (the \"Usage this run\" block is emitted when the main agent settles)");
 
 	return { report: report.join("\n"), kickoff, delivered: true };
 }

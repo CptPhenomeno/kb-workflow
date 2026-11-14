@@ -15,9 +15,11 @@
  * Every round spawned through this module — dev, reviewer and qa, bare and
  * message mode alike — is also persisted to the usage ledger with one entry
  * per round, successful or failed (FR-28), best-effort so a ledger failure
- * never fails the round or the run (NFR-15). The final report of both modes
- * carries a "Usage this run" block aggregated from this run's ledger
- * records (FR-29).
+ * never fails the round or the run (NFR-15). The "Usage this run" block of
+ * FR-29 (amended 2026-11-14) is delivered per mode: bare mode appends it to
+ * the final report, aggregated from this run's ledger records; message mode
+ * opens the kickoff window instead (lib/kickoff-window.ts) so the block is
+ * emitted when the kickoff run settles.
  */
 
 import type { KbWorkflowConfig, SessionFallbacks } from "./config.ts";
@@ -27,6 +29,7 @@ import { runMessageDev, type MessageModeDeps } from "./message-mode.ts";
 import { devTask, qaTask, reviewTask } from "./prompts.ts";
 import type { KbItem, KbRun } from "./kb.ts";
 import { renderRunUsageBlock } from "./cost-report.ts";
+import { openKickoffWindow } from "./kickoff-window.ts";
 import { readRecords } from "./usage-ledger.ts";
 import { ledgerPathFor, newRunId, recordRound } from "./round-ledger.ts";
 
@@ -114,11 +117,11 @@ export async function dispatchDev(deps: DispatchDeps): Promise<{ report: string;
 	const spawnDev = async (task: KbItem, resolved: { model?: string; thinkingLevel?: string }) =>
 		run("kb-developer", task.id, devTask(task, await storyOf(task)), resolved);
 
-	// FR-29 / AC-35: the final report carries a "Usage this run" block —
-	// this run's token/euro totals and per-role breakdown, aggregated from
-	// this run's ledger records by runId. Both retrieval modes end here, so
-	// the block lands in the bare and the message report alike; a ledger
-	// that cannot be read degrades to an empty record set (NFR-15).
+	// FR-29 (amended 2026-11-14): the "Usage this run" block is delivered
+	// per mode. Bare mode: the block lands at the end of the final report,
+	// aggregating this run's ledger records by runId (all rounds pass
+	// through the dispatch seam); a ledger that cannot be read degrades to
+	// an empty record set (NFR-15).
 	const withUsage = (report: string): string =>
 		`${report}\n\n${renderRunUsageBlock(readRecords(ledgerPath).filter((record) => record.runId === runId))}`;
 
@@ -136,7 +139,14 @@ export async function dispatchDev(deps: DispatchDeps): Promise<{ report: string;
 			notify: deps.notify,
 			setStatus: deps.setStatus,
 		});
-		return { report: withUsage(result.report), delivered: result.delivered };
+		// Message mode: the delivered kickoff opens the kickoff window
+		// (FR-29, AC-38) — the /kb-dev runId becomes the active kickoff, the
+		// kb_agent calls the main agent spawns inherit it (FR-27), and the
+		// block is emitted when the kickoff run settles (lib/kickoff-window.ts),
+		// not in this report. An aborted run delivers no kickoff and opens
+		// no window; /kb-dev requires an idle agent, so windows never overlap.
+		if (result.delivered) openKickoffWindow(runId);
+		return { report: result.report, delivered: result.delivered };
 	}
 	const result = await runBareDev({
 		cwd: deps.cwd,
